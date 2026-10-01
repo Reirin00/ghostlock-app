@@ -324,6 +324,11 @@ namespace ghostlock::route {
             };
             for (size_t i = 0; i < std::size(words); i++) {
                 struct pselect_waiter_word *w = &words[i];
+                if (compact == 2 && w->word == 12) {
+                    /* 5.10 waiter ends at +0x50 (no ww_ctx field); writing
+                     * past the struct is unproven territory — skip it. */
+                    continue;
+                }
                 pselect_put_waiter_word(context, words_per_set,
                                         w->word, w->value, w->name);
             }
