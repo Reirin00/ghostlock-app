@@ -1,5 +1,4 @@
 #include "route/select_stack_route.h"
-
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -601,7 +600,10 @@ namespace ghostlock::route {
         const route::RouteStatus status = run_route_lifecycle(context);
         if (context.status.code == ROUTE_DIRTY_FAILURE &&
             context.status.step == 34) {
-            pr_error("pselect consumer still inflight; leaking route fds\n");
+            /* v11.2: non-fatal (was pr_error => exit(-1)); the lifecycle
+             * already returned a dirty status and the caller tears the
+             * attempt down. */
+            pr_step("pselect consumer still inflight; leaking route fds\n");
         }
 
         pr_info("pselect route done calls=%d success=%d status=%d clean=%d/%d "
