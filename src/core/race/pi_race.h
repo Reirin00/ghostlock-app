@@ -73,6 +73,7 @@ namespace ghostlock::race {
         std::atomic<int32_t> route_done;
         std::atomic<int32_t> waiter_tid;
         std::atomic<int32_t> owner_tid;
+        std::atomic<int32_t> consumer_tid;
         std::atomic<int32_t> consumer_go;
         std::atomic<int32_t> consumer_stop;
         std::atomic<int32_t> consumer_calls;

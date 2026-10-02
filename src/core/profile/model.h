@@ -238,7 +238,11 @@ namespace ghostlock::profile {
         GHOSTLOCK_EXEC_U32(heap_kernelsnitch_timeout_ms)
         GHOSTLOCK_EXEC_U32(race_route_wait_ms)
         [[nodiscard]] uint32_t race_route_done_timeout_ms() const noexcept {
-            constexpr uint32_t kDefaultRouteDoneTimeoutMs = 300000;
+            /* v8: 60s. A healthy compact route finishes 4 select attempts in
+             * ~1s; the previous 300s default cost five dead minutes per hung
+             * attempt and the beat dump needs at most 30 beats to name the
+             * stuck worker. The device conf may still raise it explicitly. */
+            constexpr uint32_t kDefaultRouteDoneTimeoutMs = 60000;
             return or_default(values_.execution.race_route_done_timeout_ms,
                               kDefaultRouteDoneTimeoutMs);
         }

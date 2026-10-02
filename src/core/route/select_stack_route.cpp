@@ -473,21 +473,14 @@ namespace ghostlock::route::select_stack {
                         .tv_usec = static_cast<long>(timeout_us % 1000000),
                     };
                     const int diag_probe_errno_bak = errno;
-                    const int diag_probe =
-                        select(320, nullptr, nullptr, nullptr, &diag_tv);
-                    const int diag_probe_errno =
-                        (diag_probe < 0) ? errno : diag_probe_errno_bak;
-                    errno = diag_probe_errno_bak;
-                    pr_info("select diag: nfds=%d nofile_cur=%lu nofile_max=%lu "
-                            "tv=(%ld,%ld) probe320={ret=%d errno=%d} sets=(in=%p out=%p ex=%p) "
+                    /* v8: split enter/back so a logd stall (enter missing) is
+                     * distinguishable from the probe select never returning
+                     * (back missing) — both look identical in the 300s silence
+                     * the v8diag runs produced. */
+                    pr_info("select diag enter: nfds=%d tv_us=%u sets=(in=%p out=%p ex=%p) "
                             "in0=%016llx in1=%016llx in2=%016llx out0=%016llx out1=%016llx "
                             "ex0=%016llx ex1=%016llx\n",
-                            PSELECT_ROUTE_NFDS,
-                            static_cast<unsigned long>(nofile_rl.rlim_cur),
-                            static_cast<unsigned long>(nofile_rl.rlim_max),
-                            static_cast<long>(diag_tv.tv_sec),
-                            static_cast<long>(diag_tv.tv_usec),
-                            diag_probe, diag_probe_errno,
+                            PSELECT_ROUTE_NFDS, timeout_us,
                             static_cast<const void *>(input_set.raw()),
                             static_cast<const void *>(output_set.raw()),
                             static_cast<const void *>(exception_set.raw()),
@@ -498,6 +491,16 @@ namespace ghostlock::route::select_stack {
                             static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 1)),
                             static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 0)),
                             static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 1)));
+                    const int diag_probe =
+                        select(320, nullptr, nullptr, nullptr, &diag_tv);
+                    pr_info("select diag back: nofile_cur=%lu nofile_max=%lu "
+                            "tv=(%ld,%ld) probe320={ret=%d errno=%d}\n",
+                            static_cast<unsigned long>(nofile_rl.rlim_cur),
+                            static_cast<unsigned long>(nofile_rl.rlim_max),
+                            static_cast<long>(diag_tv.tv_sec),
+                            static_cast<long>(diag_tv.tv_usec),
+                            diag_probe, (diag_probe < 0) ? errno : 0);
+                    errno = diag_probe_errno_bak;
                 }
                 /* 5.10 (compact_waiter=2): call select(), not pselect().
                  * The kernel-side select handler frame is 0x50 bytes
