@@ -477,20 +477,34 @@ namespace ghostlock::route::select_stack {
                      * distinguishable from the probe select never returning
                      * (back missing) — both look identical in the 300s silence
                      * the v8diag runs produced. */
-                    pr_info("select diag enter: nfds=%d tv_us=%u sets=(in=%p out=%p ex=%p) "
-                            "in0=%016llx in1=%016llx in2=%016llx out0=%016llx out1=%016llx "
-                            "ex0=%016llx ex1=%016llx\n",
+                    pr_info("select diag enter: nfds=%d tv_us=%u sets=(in=%p out=%p ex=%p)\n",
                             PSELECT_ROUTE_NFDS, timeout_us,
                             static_cast<const void *>(input_set.raw()),
                             static_cast<const void *>(output_set.raw()),
-                            static_cast<const void *>(exception_set.raw()),
+                            static_cast<const void *>(exception_set.raw()));
+                    /* v10-diag: full 15-word stamped baseline (in 5 + out 5
+                     * + ex 5). Words must survive verbatim until the kernel
+                     * write lands mid-select; the back-words dump below
+                     * diffs against this. */
+                    pr_info("select diag enter-words: "
+                            "in=%016llx %016llx %016llx %016llx %016llx "
+                            "out=%016llx %016llx %016llx %016llx %016llx "
+                            "ex=%016llx %016llx %016llx %016llx %016llx\n",
                             static_cast<unsigned long long>(route::fdset_get_word(input_set.raw(), 0)),
                             static_cast<unsigned long long>(route::fdset_get_word(input_set.raw(), 1)),
                             static_cast<unsigned long long>(route::fdset_get_word(input_set.raw(), 2)),
+                            static_cast<unsigned long long>(route::fdset_get_word(input_set.raw(), 3)),
+                            static_cast<unsigned long long>(route::fdset_get_word(input_set.raw(), 4)),
                             static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 0)),
                             static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 1)),
+                            static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 2)),
+                            static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 3)),
+                            static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 4)),
                             static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 0)),
-                            static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 1)));
+                            static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 1)),
+                            static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 2)),
+                            static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 3)),
+                            static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 4)));
                     const int diag_probe =
                         select(320, nullptr, nullptr, nullptr, &diag_tv);
                     pr_info("select diag back: nofile_cur=%lu nofile_max=%lu "
@@ -524,6 +538,30 @@ namespace ghostlock::route::select_stack {
                     exception_set.raw(), &timeout);
             }
             select_errno = errno;
+            /* v10-diag: post-select 15-word dump. select() returning 0
+             * zeroes out/ex on the kernel side before the copy-back, so
+             * enter-vs-back word diffs name exactly which stamped words
+             * the kernel rewrote (copy-back erase window) and which
+             * survived untouched. Pair with the enter dump above. */
+            pr_info("select diag back-words: "
+                    "in=%016llx %016llx %016llx %016llx %016llx "
+                    "out=%016llx %016llx %016llx %016llx %016llx "
+                    "ex=%016llx %016llx %016llx %016llx %016llx\n",
+                    static_cast<unsigned long long>(route::fdset_get_word(input_set.raw(), 0)),
+                    static_cast<unsigned long long>(route::fdset_get_word(input_set.raw(), 1)),
+                    static_cast<unsigned long long>(route::fdset_get_word(input_set.raw(), 2)),
+                    static_cast<unsigned long long>(route::fdset_get_word(input_set.raw(), 3)),
+                    static_cast<unsigned long long>(route::fdset_get_word(input_set.raw(), 4)),
+                    static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 0)),
+                    static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 1)),
+                    static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 2)),
+                    static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 3)),
+                    static_cast<unsigned long long>(route::fdset_get_word(output_set.raw(), 4)),
+                    static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 0)),
+                    static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 1)),
+                    static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 2)),
+                    static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 3)),
+                    static_cast<unsigned long long>(route::fdset_get_word(exception_set.raw(), 4)));
             route::restore_standard_io(stdio_backup);
             pr_info("pselect post-select attempt=%d/%d compact=%d +%.0fms ret=%d errno=%d (%s)\n",
                     attempt, attempts, layout.compact_waiter.value_or(0),
