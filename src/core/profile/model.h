@@ -289,6 +289,12 @@ namespace ghostlock::profile {
             return loaded_ && effective_compact_waiter() != 0;
         }
 
+        /* GKI 5.x exports a shim copy of selinux_state for the core kernel;
+         * stages that must clear both instances gate on this. */
+        [[nodiscard]] uint8_t kernel_major() const noexcept {
+            return values_.meta.kernel_major;
+        }
+
         [[nodiscard]] bool safe_mode() const noexcept {
             return loaded_ && values_.meta.safe_mode;
         }
