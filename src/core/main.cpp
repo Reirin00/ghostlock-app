@@ -35,11 +35,6 @@ int main(int argc, char **argv) {
          * so the on-device log is panic-accurate. */
         ::setvbuf(stdout, nullptr, _IONBF, 0);
         ::setvbuf(stderr, nullptr, _IONBF, 0);
-        /* v11.8b: the O_SYNC tee — the direct path's log file goes through
-         * logcat + MediaStore and loses everything on panic; this file is
-         * written by the native itself with O_SYNC per line. v11.8c probes
-         * app-owned dirs with mkdir fallback. */
-        support::osync_log_init();
         profile::kernel_offsets decoded = {};
         std::array<char, 256> release_buf{};
         binary_profile::component_ids ids{
@@ -79,6 +74,12 @@ int main(int argc, char **argv) {
             return 1;
         }
         support::run_state::configure(status_record);
+
+        /* v11.8f: O_SYNC tee lives in the run's debug-export dir when the app
+         * passed --dump-kernel-log — same folder as profile.conf, directly
+         * pullable over adb even after a panic. Falls back to app-private
+         * dirs when the dump dir is absent (CLI/manual runs). */
+        support::osync_log_init(dump_dir);
 
         int32_t loaded;
         if (prebuilt_path != nullptr) {

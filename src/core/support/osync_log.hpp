@@ -42,8 +42,25 @@ inline std::FILE *osync_try_open(const char *dir) {
     return f;
 }
 
-inline void osync_log_init() {
+inline void osync_log_init(const char *preferred_dir = nullptr) {
     if (g_osync_log) return;
+    /* v11.8f: prefer the run's debug-export dir (--dump-kernel-log, the same
+     * folder profile.conf lands in). The app created it under its own uid
+     * before spawning us, so FUSE lets us append — and adb can pull it
+     * directly, unlike filesDir. */
+    if (preferred_dir && preferred_dir[0]) {
+        std::string path = std::string(preferred_dir) + "/native-osync.log";
+        int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_SYNC, 0644);
+        if (fd >= 0) {
+            std::FILE *f = ::fdopen(fd, "a");
+            if (f) {
+                ::setvbuf(f, nullptr, _IONBF, 0);
+                g_osync_log = f;
+                return;
+            }
+            ::close(fd);
+        }
+    }
     static const char *const kCandidates[] = {
             "/data/data/com.ghostlock.app/files",
             "/storage/emulated/0/Android/data/com.ghostlock.app/files",
