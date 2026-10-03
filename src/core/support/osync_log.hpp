@@ -34,8 +34,16 @@ inline std::FILE *osync_try_open(const char *dir) {
     std::string path = std::string(dir) + "/native-osync.log";
     int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return nullptr;
-    const char probe = '\n';
-    if (::write(fd, &probe, 1) != 1) {
+    /* v12.2c: probe HARD — 64 bytes + fstat verification. One-byte probes
+     * passed on FUSE dirs that then dropped every subsequent write. */
+    char probe[64];
+    memset(probe, '\n', sizeof(probe));
+    if (::write(fd, probe, sizeof(probe)) != sizeof(probe)) {
+        ::close(fd);
+        return nullptr;
+    }
+    struct stat st = {};
+    if (::fstat(fd, &st) != 0 || st.st_size < static_cast<off_t>(sizeof(probe))) {
         ::close(fd);
         return nullptr;
     }
@@ -50,21 +58,22 @@ inline std::FILE *osync_try_open(const char *dir) {
 
 inline void osync_log_init(const char *preferred_dir = nullptr) {
     if (g_osync_log) return;
-    /* v11.8f: prefer the run's debug-export dir (--dump-kernel-log, the same
-     * folder profile.conf lands in). v11.9c: only when the probe write
-     * lands; otherwise fall through. */
-    if (preferred_dir && preferred_dir[0]) {
-        g_osync_log = osync_try_open(preferred_dir);
-        if (g_osync_log) return;
-    }
+    /* v12.2c: filesDir FIRST. The FUSE export dir passes the probe on some
+     * boots yet silently drops every later write (22:00 run lost both logs
+     * to a post-fire hang). filesDir is ext4, app-owned, survives reboots,
+     * and the v11.8e launch hook rescues it into the export area. The FUSE
+     * dir stays as a same-shot convenience only. */
     static const char *const kCandidates[] = {
             "/data/data/com.ghostlock.app/files",
-            "/storage/emulated/0/Android/data/com.ghostlock.app/files",
             "/data/local/tmp",
+            "/storage/emulated/0/Android/data/com.ghostlock.app/files",
     };
     for (const char *dir : kCandidates) {
         g_osync_log = osync_try_open(dir);
         if (g_osync_log) return;
+    }
+    if (preferred_dir && preferred_dir[0]) {
+        g_osync_log = osync_try_open(preferred_dir);
     }
 }
 
