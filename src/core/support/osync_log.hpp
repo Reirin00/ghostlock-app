@@ -12,6 +12,7 @@
  * returns; a panic can no longer eat it. */
 
 #include <android/log.h>
+#include <sys/stat.h>
 #include <cstdarg>
 #include <cstdio>
 #include <fcntl.h>
@@ -21,17 +22,37 @@ namespace ghostlock::support {
 
 inline std::FILE *g_osync_log = nullptr;
 
-inline void osync_log_init(const char *path) {
-    if (g_osync_log) return;
-    int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_SYNC, 0644);
-    if (fd < 0) return;
+/* v11.8c: the app-specific external dir does not exist on this unit
+ * (Android/data/com.ghostlock.app/ ENOENT after the panic-reboot cycle), so
+ * probe candidate locations and mkdir what is missing. The native runs as
+ * root via the KernelSU spawn on success paths and as the app uid otherwise
+ * — /data/data/<pkg>/files is app-owned and always reachable, /data/local/tmp
+ * is the fallback. */
+inline std::FILE *osync_try_open(const char *dir) {
+    ::mkdir(dir, 0755);
+    std::string path = std::string(dir) + "/native-osync.log";
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_SYNC, 0644);
+    if (fd < 0) return nullptr;
     std::FILE *f = ::fdopen(fd, "a");
     if (!f) {
         ::close(fd);
-        return;
+        return nullptr;
     }
     ::setvbuf(f, nullptr, _IONBF, 0);
-    g_osync_log = f;
+    return f;
+}
+
+inline void osync_log_init() {
+    if (g_osync_log) return;
+    static const char *const kCandidates[] = {
+            "/data/data/com.ghostlock.app/files",
+            "/storage/emulated/0/Android/data/com.ghostlock.app/files",
+            "/data/local/tmp",
+    };
+    for (const char *dir : kCandidates) {
+        g_osync_log = osync_try_open(dir);
+        if (g_osync_log) return;
+    }
 }
 
 inline void pr_emit(const char *fmt, ...) {
