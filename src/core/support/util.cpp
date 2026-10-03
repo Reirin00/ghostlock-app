@@ -773,8 +773,13 @@ namespace ghostlock::support {
              * scan (collision discovery and/or mm brute force); seven zero-gap
              * cycles matched the 23:13:44 system avalanche exactly. The streak
              * covers both failure kinds; cap it and cool down before the next
-             * scan. */
-            if (g_mm_leak_fail_streak >= 6) {
+             * scan. v11.7: 6 -> 10. Every attempt now runs with the 2s cooldown
+             * below (the 23:13:44 avalanche was zero-gap), the v11.5 agreement
+             * gate discards poisoned sets before they reach the mm scan, and
+             * the 2026-10-03 12:33 run burned 3 of 6 attempts on discarded
+             * sets alone — at the ~1/3 per-scan leak rate, 6 scans leave
+             * ~9% all-miss odds while 10 leave ~1.7%. */
+            if (g_mm_leak_fail_streak >= 10) {
                 pr_warning("kernelsnitch failed %d consecutive attempts; stopping prepare "
                            "to avoid futex residue avalanche\n", g_mm_leak_fail_streak);
                 break;
