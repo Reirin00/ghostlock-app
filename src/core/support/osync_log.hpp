@@ -28,10 +28,14 @@ inline std::FILE *g_osync_log = nullptr;
  * root via the KernelSU spawn on success paths and as the app uid otherwise
  * — /data/data/<pkg>/files is app-owned and always reachable, /data/local/tmp
  * is the fallback. */
+/* v11.9b: NO O_SYNC here — FUSE (/storage/emulated) silently swallows
+ * O_SYNC writes: panic #10 left a 0-byte file despite 56s of runtime.
+ * _IONBF alone gives one write(2) per log line through FUSE, so a panic
+ * loses at most the line in flight. */
 inline std::FILE *osync_try_open(const char *dir) {
     ::mkdir(dir, 0755);
     std::string path = std::string(dir) + "/native-osync.log";
-    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_SYNC, 0644);
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return nullptr;
     std::FILE *f = ::fdopen(fd, "a");
     if (!f) {
@@ -50,7 +54,7 @@ inline void osync_log_init(const char *preferred_dir = nullptr) {
      * directly, unlike filesDir. */
     if (preferred_dir && preferred_dir[0]) {
         std::string path = std::string(preferred_dir) + "/native-osync.log";
-        int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_SYNC, 0644);
+        int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd >= 0) {
             std::FILE *f = ::fdopen(fd, "a");
             if (f) {
