@@ -628,8 +628,24 @@ namespace ghostlock::kernelsnitch {
             size_t count2 = __collision_pass(ks, MEASURE_SLOW_REPEAT, MEASURE_SLOW_AVG, MEASURE_SLOW_REPEAT,
                                              MEASURE_SLOW_AVG);
             if (count2 != wanted) {
-                pr_warning("agreement pass found %zu/%zu collisions -> discard set\n", count2, wanted);
-                count = 0;
+                /* v11.5: 0-found is NOT a mismatch — the agreement pass's own
+                 * drain/re-pile prove can transiently measure zero colliders
+                 * on a busy system (2026-10-03 10:52 run: 7 consecutive
+                 * 0/3 discards, all with screen 4-6/3 passing seconds
+                 * earlier). futex_addrs[1..] still holds pass-1's set (a
+                 * 0-count pass writes nothing); keep it and let the mm
+                 * brute-force scan arbitrate — that scan is the ground
+                 * truth anyway and the streak guard bounds the cost of a
+                 * truly poisoned set. A nonzero set that disagrees IS a
+                 * mismatch: discard. */
+                if (count2 == 0) {
+                    if (ks->verbose)
+                        pr_info("agreement pass found nothing (churn); keeping pass-1 set\n");
+                } else {
+                    pr_warning("agreement pass found %zu/%zu collisions -> discard set\n",
+                               count2, wanted);
+                    count = 0;
+                }
             } else {
                 size_t agree = 0;
                 for (size_t i = 0; i < wanted; ++i) {
