@@ -426,7 +426,18 @@ namespace ghostlock::route::select_stack {
      * attempt resprays and re-derives fake_* before rebuilding the fd_sets.
      * The consumer handshake advances consumer_go per attempt so the trigger
      * is seen as a new sequence. */
-        const int32_t attempts = layout.compact_waiter.value_or(0) ? 4 : 1;
+        /* v11.9 (codex review): the in-route retry re-enters
+         * prepare_good_kernel_page() and re-signals the consumer while the
+         * attempt-1 PI waiter is still alive. On 5.10 the
+         * FUTEX_CMP_REQUEUE_PI EDEADLK rollback leaves the WAITER task's
+         * pi_blocked_on dangling (remove_waiter() clears current — the
+         * requeue caller — not waiter->task), so attempt 2+'s
+         * sched_setattr(waiter_tid) walks the ghost and panics in
+         * rt_mutex_adjust_prio_chain+0x188 (panics #6/#7/#8, 2026-10-03).
+         * Only 6.x compact may retry in-route; 5.x gets exactly one attempt
+         * per fully-disarmed race, like the CLI flow. */
+        const int32_t attempts =
+                (profile.kernel_major() >= 6 && layout.compact_waiter.value_or(0)) ? 4 : 1;
         int32_t calls_total = 0;
         int32_t successes_total = 0;
 

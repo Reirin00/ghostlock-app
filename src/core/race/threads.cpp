@@ -205,24 +205,26 @@ namespace ghostlock::race {
         if (controller.fallback_used) {
             pr_warning("TCP route cleanly failed; used Select Stack fallback\n");
         }
-        /* v11.6: disarm unconditionally. The select-stack route triggers the
-         * same remove_waiter rollback defect as mcast (rtmutex.c:1075 leaves
-         * this task's pi_blocked_on pointing at the reclaimed stack waiter),
-         * and every later sched_setattr on this task walks that ghost: the
-         * recycled stack reads waiter->lock as NULL and
-         * raw_spin_trylock(&lock->wait_lock) panics —
-         * rt_mutex_adjust_prio_chain+0x188, ldar [x27=0], confirmed in the
-         * 2026-10-03 pstore. The old route_needs_ghost_disarm() gate only
-         * enabled this for the multicast policy, so the select route never
-         * disarmed. Run the slow-path removal while this thread's stack is
-         * still alive; the 0-timeout LOCK_PI always returns ETIMEDOUT — the
-         * kernel side effect is the point, not the return value. */
-        for (int disarm_try = 0; disarm_try < 2; ++disarm_try) {
+        /* v11.9 (codex review): ONE verifiable disarm. The 0-timeout
+         * LOCK_PI's slow path overwrites THIS task's pi_blocked_on and
+         * remove_waiter() clears it — valid only when it actually reached
+         * the slow path, i.e. returned ETIMEDOUT. A success return means we
+         * acquired the dummy (owner died?); unlock it immediately. Anything
+         * else (EDEADLK would mean owner==self) leaves the old value in
+         * place — fail-stop the attempt as dirty. */
+        {
             uint32_t dummy_pi = 0x80000000U | static_cast<uint32_t>(getpid());
             struct timespec expired = {.tv_sec = 0, .tv_nsec = 0};
             errno = 0;
             long disarm = support::futex_op(&dummy_pi, FUTEX_LOCK_PI, 0, &expired, nullptr, 0);
-            pr_info("select ghost disarm try=%d ret=%ld errno=%d\n", disarm_try, disarm, errno);
+            if (disarm == 0) {
+                pr_warning("select ghost disarm acquired dummy; unlocking\n");
+                support::futex_op(&dummy_pi, FUTEX_UNLOCK_PI, 0, nullptr, nullptr, 0);
+            } else if (errno == ETIMEDOUT || errno == EAGAIN) {
+                pr_info("select ghost disarmed (slow path ran, pi_blocked_on cleared)\n");
+            } else {
+                pr_error("select ghost disarm unexpected ret=%ld errno=%d; dirty\n", disarm, errno);
+            }
         }
         race->route_done.store(1);
         /* v11: this unlock is what wakes the owner's blocking LOCK_PI and
