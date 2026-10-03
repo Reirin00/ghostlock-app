@@ -1,0 +1,68 @@
+#pragma once
+
+/* v11.8b: panic-proof native-side log tee.
+ *
+ * The app's direct path delivers native logs to ghostlock-direct-*.log.txt
+ * via a three-hop chain: __android_log_print -> logcat daemon -> app pipe
+ * reader -> MediaStore file. Every hop buffers, and a kernel panic kills the
+ * chain mid-flight — the 2026-10-03 13:34 panic left a zero-byte log even
+ * though the native had run for ~65s. Bypass all of it: pr_emit writes each
+ * line to logcat (live debugging) AND appends to an O_SYNC, _IONBF file the
+ * native owns outright. O_SYNC means the line is on storage before the call
+ * returns; a panic can no longer eat it. */
+
+#include <android/log.h>
+#include <cstdarg>
+#include <cstdio>
+#include <fcntl.h>
+#include <unistd.h>
+
+namespace ghostlock::support {
+
+inline std::FILE *g_osync_log = nullptr;
+
+inline void osync_log_init(const char *path) {
+    if (g_osync_log) return;
+    int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_SYNC, 0644);
+    if (fd < 0) return;
+    std::FILE *f = ::fdopen(fd, "a");
+    if (!f) {
+        ::close(fd);
+        return;
+    }
+    ::setvbuf(f, nullptr, _IONBF, 0);
+    g_osync_log = f;
+}
+
+inline void pr_emit(const char *fmt, ...) {
+    {
+        va_list ap;
+        va_start(ap, fmt);
+        std::vfprintf(stdout, fmt, ap);
+        std::fflush(stdout);
+        va_end(ap);
+    }
+    if (g_osync_log) {
+        va_list ap;
+        va_start(ap, fmt);
+        std::vfprintf(g_osync_log, fmt, ap);
+        va_end(ap);
+    }
+}
+
+inline void pr_emit_logcat(int prio, const char *fmt, ...) {
+    {
+        va_list ap;
+        va_start(ap, fmt);
+        __android_log_vprint(prio, "google_poc_app", fmt, ap);
+        va_end(ap);
+    }
+    if (g_osync_log) {
+        va_list ap;
+        va_start(ap, fmt);
+        std::vfprintf(g_osync_log, fmt, ap);
+        va_end(ap);
+    }
+}
+
+} // namespace ghostlock::support

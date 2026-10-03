@@ -34,6 +34,11 @@ int main(int argc, char **argv) {
          * so the on-device log is panic-accurate. */
         ::setvbuf(stdout, nullptr, _IONBF, 0);
         ::setvbuf(stderr, nullptr, _IONBF, 0);
+        /* v11.8b: the app-owned O_SYNC tee — the direct path's log file goes
+         * through logcat + MediaStore and loses everything on panic; this
+         * file is written by the native itself with O_SYNC per line. */
+        support::osync_log_init(
+                "/storage/emulated/0/Android/data/com.ghostlock.app/files/native-osync.log");
         profile::kernel_offsets decoded = {};
         std::array<char, 256> release_buf{};
         binary_profile::component_ids ids{
