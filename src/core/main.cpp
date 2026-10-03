@@ -15,6 +15,7 @@
 #include "profile/entry.h"
 #include "support/fatal_error.hpp"
 #include "support/run_state.hpp"
+#include "support/osync_log.hpp"
 #include "route/orchestrator.hpp"
 
 #include <array>
