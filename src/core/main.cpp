@@ -27,6 +27,13 @@ using namespace ghostlock;
 
 int main(int argc, char **argv) {
     try {
+        /* v11.8: the app redirects stdout into ghostlock-direct-*.log.txt, so
+         * stdio switches to full block buffering and every panic eats the last
+         * ~8KB of log — both 2026-10-03 afternoon runs died with a truncated
+         * final line, hiding whether the race started. Force line-unbuffered
+         * so the on-device log is panic-accurate. */
+        ::setvbuf(stdout, nullptr, _IONBF, 0);
+        ::setvbuf(stderr, nullptr, _IONBF, 0);
         profile::kernel_offsets decoded = {};
         std::array<char, 256> release_buf{};
         binary_profile::component_ids ids{
