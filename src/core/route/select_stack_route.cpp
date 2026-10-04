@@ -1,5 +1,9 @@
 #include "route/select_stack_route.h"
 #include <sys/resource.h>
+#include <sys/select.h>
+#include <sys/syscall.h>
+#include <ctime>
+#include <time.h>
 #include <unistd.h>
 
 #include <utility>
@@ -526,26 +530,45 @@ namespace ghostlock::route::select_stack {
                             diag_probe, (diag_probe < 0) ? errno : 0);
                     errno = diag_probe_errno_bak;
                 }
-                /* 5.10 (compact_waiter=2): call select(), not pselect().
-                 * The kernel-side select handler frame is 0x50 bytes
-                 * shallower than pselect6's; on the SO-54C 5.10.236 build
-                 * the stale rt_mutex_waiter then lands exactly at fd_set
-                 * word 0 (CLI-proven layout, ghostports shape-0), keeping
-                 * every stamped word inside the 15-word on-stack window.
-                 * pselect's deeper frame pushed the waiter to global word
-                 * 17 — unreachable with nfds=320 (panic +0x188,
-                 * waiter->lock = 0x800).
-                 * NOTE: select_timeout_us is microseconds; tv_usec must
-                 * stay < 1000000. The earlier `* 1000` here turned 200000
-                 * into tv_usec=2e8 and select() bailed out with EINVAL
-                 * at +0ms on the first 5.10 run that got past CMP. */
+                /* v12.11 ★ Sony shift 定案：5.10 legacy 必须走 pselect6
+                 * 系统调用（73 / __arm64_sys_pselect6），不能用 libc select()。
+                 * ——libc select() 在本机确为 72（__arm64_sys_select）：反汇编
+                 *   /system/lib64/libc.so 得 select@@LIBC -> 桩 `mov x8,#0x48;
+                 *   svc`，pselect@@LIBC -> `mov x8,#0x49`（0x49=73）✓
+                 * 栈几何（相对该线程内核栈顶 TOP；入口开销 = S_FRAME_SIZE 0x150
+                 * + el0_sync_handler 0x10 + el0_svc 0x10 + el0_svc_common 0x50
+                 * = 0x1C0，已用 consumer 的 panic SP 落到整 16KB 栈顶交叉验证）：
+                 *   select()   fd_set 三元组 = TOP-0x1C0-0x80 -0x1c0+0x50 = TOP-0x3B0
+                 *   pselect6() fd_set 三元组 = TOP-0x1C0-0xa0 -0x1c0+0x50 = TOP-0x3D0
+                 *   陈旧 rt_mutex_waiter       = TOP-0x3D0
+                 *   （4 次独立 +0x188 panic 的 x28 低 16 位恒为 0xbc30）
+                 * ⇒ 只有 pselect6 让 global word 0 正好压在 ghost 基址上；
+                 *   select() 高 4 个字，任何 shift/nfds 都够不到（这也是过去
+                 *   mcast/select 全部 miss 的唯一根因）。
+                 * waiter_shift=-2 把 App 词表下标（compact+2）折回 global word，
+                 * 于是 ghost 基址 = global word 0。 */
+                int32_t compact = layout.compact_waiter.value_or(0);
                 struct timeval timeout = {
                     .tv_sec = timeout_us / 1000000,
                     .tv_usec = timeout_us % 1000000,
                 };
-                select_result = select(
-                    PSELECT_ROUTE_NFDS, input_set.raw(), output_set.raw(),
-                    exception_set.raw(), &timeout);
+                if (compact == 2) {
+                    struct timespec psel_ts = {
+                        .tv_sec = static_cast<time_t>(timeout_us / 1000000),
+                        .tv_nsec = static_cast<long>(timeout_us % 1000000) * 1000,
+                    };
+                    pr_info("pselect6 carrier: nfds=%d shift=%d ts=(%lld,%ld)\n",
+                            PSELECT_ROUTE_NFDS,
+                            route::pselect_waiter_shift(this),
+                            static_cast<long long>(psel_ts.tv_sec), psel_ts.tv_nsec);
+                    select_result = static_cast<int32_t>(syscall(
+                        SYS_pselect6, PSELECT_ROUTE_NFDS, input_set.raw(),
+                        output_set.raw(), exception_set.raw(), &psel_ts, nullptr));
+                } else {
+                    select_result = select(
+                        PSELECT_ROUTE_NFDS, input_set.raw(), output_set.raw(),
+                        exception_set.raw(), &timeout);
+                }
             }
             select_errno = errno;
             /* v10-diag: post-select 15-word dump. select() returning 0
