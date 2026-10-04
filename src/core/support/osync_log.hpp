@@ -1,110 +1,118 @@
 #pragma once
 
-/* v11.8b: panic-proof native-side log tee.
+/* v12.6: panic-proof native-side log tee — RAW FD EDITION.
  *
- * The app's direct path delivers native logs to ghostlock-direct-*.log.txt
- * via a three-hop chain: __android_log_print -> logcat daemon -> app pipe
- * reader -> MediaStore file. Every hop buffers, and a kernel panic kills the
- * chain mid-flight — the 2026-10-03 13:34 panic left a zero-byte log even
- * though the native had run for ~65s. Bypass all of it: each line also goes
- * to a file the native owns outright.
- *
- * v11.9b: NO O_SYNC — FUSE (/storage/emulated) silently swallows O_SYNC
- * writes.
- * v11.9c: VERIFY the open actually delivers bytes. The direct-path native
- * runs as the app uid; on the 17:14 run open() on the FUSE export dir
- * succeeded but every write() was silently discarded (0-byte file after a
- * 90s run). Probe-write each candidate and fall through on failure; the
- * filesDir candidate is rescued into the export area by the app itself on
- * the next launch (v11.8e hook). */
+ * History: the FILE*-based tee (fdopen + _IONBF + vfprintf) silently lost
+ * every log line on this unit — the 64-byte probe written with raw
+ * write(2) always landed (filesDir AND FUSE), yet not a single vfprintf
+ * line ever appeared in the rescued archives (20261004-125637/141822:
+ * 64/65 bytes after minutes-long runs). The stdio layer is the only
+ * difference between the working probe and the failing writes, so it is
+ * gone: the tee is now a raw fd and every line is one ::write(2). */
 
 #include <android/log.h>
 #include <sys/stat.h>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
 
 namespace ghostlock::support {
 
-inline std::FILE *g_osync_log = nullptr;
+inline int g_osync_fd = -1;
 
-inline std::FILE *osync_try_open(const char *dir) {
+inline int osync_try_open(const char *dir) {
     ::mkdir(dir, 0755);
     std::string path = std::string(dir) + "/native-osync.log";
     int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return nullptr;
-    /* v12.2c: probe HARD — 64 bytes + fstat verification. One-byte probes
-     * passed on FUSE dirs that then dropped every subsequent write. */
+    if (fd < 0) return -1;
     char probe[64];
     memset(probe, '\n', sizeof(probe));
     if (::write(fd, probe, sizeof(probe)) != sizeof(probe)) {
         ::close(fd);
-        return nullptr;
+        return -1;
     }
     struct stat st = {};
     if (::fstat(fd, &st) != 0 || st.st_size < static_cast<off_t>(sizeof(probe))) {
         ::close(fd);
-        return nullptr;
+        return -1;
     }
-    std::FILE *f = ::fdopen(fd, "a");
-    if (!f) {
-        ::close(fd);
-        return nullptr;
-    }
-    ::setvbuf(f, nullptr, _IONBF, 0);
-    return f;
+    return fd;
 }
 
 inline void osync_log_init(const char *preferred_dir = nullptr) {
-    if (g_osync_log) return;
-    /* v12.2c: filesDir FIRST. The FUSE export dir passes the probe on some
-     * boots yet silently drops every later write (22:00 run lost both logs
-     * to a post-fire hang). filesDir is ext4, app-owned, survives reboots,
-     * and the v11.8e launch hook rescues it into the export area. The FUSE
-     * dir stays as a same-shot convenience only. */
+    if (g_osync_fd >= 0) return;
+    /* filesDir first (ext4, app-owned, survives reboots; OsyncRescue moves
+     * it into the export area at every app start), then shell-readable tmp,
+     * then the FUSE export dir as a same-shot convenience. */
     static const char *const kCandidates[] = {
             "/data/data/com.ghostlock.app/files",
             "/data/local/tmp",
             "/storage/emulated/0/Android/data/com.ghostlock.app/files",
     };
     for (const char *dir : kCandidates) {
-        g_osync_log = osync_try_open(dir);
-        if (g_osync_log) return;
+        g_osync_fd = osync_try_open(dir);
+        if (g_osync_fd >= 0) return;
     }
     if (preferred_dir && preferred_dir[0]) {
-        g_osync_log = osync_try_open(preferred_dir);
+        g_osync_fd = osync_try_open(preferred_dir);
+    }
+}
+
+/* v12.6: one ::write(2) per line onto the raw fd — no stdio, no buffering,
+ * no silent drop layer. */
+inline void osync_write_line(const char *buf, size_t len) {
+    if (g_osync_fd < 0 || !buf || len == 0) return;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = ::write(g_osync_fd, buf + off, len - off);
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            break; /* the tee is best-effort; never block logging */
+        }
+        off += static_cast<size_t>(n);
     }
 }
 
 inline void pr_emit(const char *fmt, ...) {
-    if (g_osync_log) {
-        va_list ap;
-        va_start(ap, fmt);
-        std::vfprintf(g_osync_log, fmt, ap);
-        va_end(ap);
+    char stackbuf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = std::vsnprintf(stackbuf, sizeof(stackbuf), fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        size_t len = static_cast<size_t>(n) < sizeof(stackbuf)
+                         ? static_cast<size_t>(n)
+                         : sizeof(stackbuf) - 1;
+        osync_write_line(stackbuf, len);
     }
     {
-        va_list ap;
-        va_start(ap, fmt);
-        std::vfprintf(stdout, fmt, ap);
+        va_list ap2;
+        va_start(ap2, fmt);
+        std::vfprintf(stdout, fmt, ap2);
         std::fflush(stdout);
-        va_end(ap);
+        va_end(ap2);
     }
 }
 
 inline void pr_emit_logcat(int prio, const char *fmt, ...) {
-    if (g_osync_log) {
-        va_list ap;
-        va_start(ap, fmt);
-        std::vfprintf(g_osync_log, fmt, ap);
-        va_end(ap);
+    char stackbuf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = std::vsnprintf(stackbuf, sizeof(stackbuf), fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        size_t len = static_cast<size_t>(n) < sizeof(stackbuf)
+                         ? static_cast<size_t>(n)
+                         : sizeof(stackbuf) - 1;
+        osync_write_line(stackbuf, len);
     }
     {
-        va_list ap;
-        va_start(ap, fmt);
-        __android_log_vprint(prio, "google_poc_app", fmt, ap);
-        va_end(ap);
+        va_list ap2;
+        va_start(ap2, fmt);
+        __android_log_vprint(prio, "google_poc_app", fmt, ap2);
+        va_end(ap2);
     }
 }
 
