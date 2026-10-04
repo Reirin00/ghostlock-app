@@ -467,7 +467,10 @@ namespace ghostlock::route::select_stack {
             race->consumer_stop.store(0);
             uint32_t delay_usec = route::route_delay_usec(this, attempt);
             race->route_delay_usec.store(delay_usec);
-            race->consumer_go.store(attempt);
+            /* v12.12: consumer_go 原先在这里、在 diag 探针之前置位——diag 用
+             * libc select()(72) 驻留 timeout_us，与 consumer 轮询的载体号相同，
+             * fd_set 却是 NULL（陈旧 ghost 未盖章）→ 轮询会命中并往未盖章
+             * 窗口里点火。现在挪到 diag 之后、真载体进栈之前。 */
 
             pr_info("pselect pre-select attempt=%d/%d compact=%d +%.0fms\n",
                     attempt, attempts, layout.compact_waiter.value_or(0),
@@ -482,16 +485,21 @@ namespace ghostlock::route::select_stack {
                 {
                     struct rlimit nofile_rl {};
                     getrlimit(RLIMIT_NOFILE, &nofile_rl);
+                    /* v12.12: 探针驻留固定 2ms——它的职责只是验证 nfds/环境
+                     * （v8/v10-diag 已取完数据）。跟随 timeout_us 会让它以
+                     * select(72) 的身份长时间驻留，污染 /proc syscall 号
+                     * 语义（现在 consumer_go 已挪到探针后，双保险）。 */
+                    constexpr uint32_t diag_tv_us = 2000;
                     struct timeval diag_tv = {
-                        .tv_sec = static_cast<time_t>(timeout_us / 1000000),
-                        .tv_usec = static_cast<long>(timeout_us % 1000000),
+                        .tv_sec = static_cast<time_t>(diag_tv_us / 1000000),
+                        .tv_usec = static_cast<long>(diag_tv_us % 1000000),
                     };
                     const int diag_probe_errno_bak = errno;
                     /* v8: split enter/back so a logd stall (enter missing) is
                      * distinguishable from the probe select never returning
                      * (back missing) — both look identical in the 300s silence
                      * the v8diag runs produced. */
-                    pr_info("select diag enter: nfds=%d tv_us=%u sets=(in=%p out=%p ex=%p)\n",
+                    pr_info("select diag enter: nfds=%d tv_us=%u(real timeout) probe_us=2000 sets=(in=%p out=%p ex=%p)\n",
                             PSELECT_ROUTE_NFDS, timeout_us,
                             static_cast<const void *>(input_set.raw()),
                             static_cast<const void *>(output_set.raw()),
@@ -530,6 +538,9 @@ namespace ghostlock::route::select_stack {
                             diag_probe, (diag_probe < 0) ? errno : 0);
                     errno = diag_probe_errno_bak;
                 }
+                /* v12.12: consumer 现在才放行——此后 waiter 进真载体
+                 * (pselect6=73) 驻留，/proc syscall 号即所轮询的号，
+                 * fd_set 已盖章，轮询命中即安全点火。 */
                 /* v12.11 ★ Sony shift 定案：5.10 legacy 必须走 pselect6
                  * 系统调用（73 / __arm64_sys_pselect6），不能用 libc select()。
                  * ——libc select() 在本机确为 72（__arm64_sys_select）：反汇编
@@ -552,6 +563,7 @@ namespace ghostlock::route::select_stack {
                     .tv_sec = timeout_us / 1000000,
                     .tv_usec = timeout_us % 1000000,
                 };
+                race->consumer_go.store(attempt);
                 if (compact == 2) {
                     struct timespec psel_ts = {
                         .tv_sec = static_cast<time_t>(timeout_us / 1000000),

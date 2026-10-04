@@ -85,12 +85,13 @@ namespace {
 
     /* CLI-proven firing discipline (ghostlock-oneplus main.c:194): before the
      * first sched_setattr of a seq, wait until the waiter provably entered
-     * select — /proc/<tid>/syscall == 72 (pselect6 on arm64; bionic select()
-     * wraps pselect6) AND wchan contains do_select, i.e. the fd_set copy is
-     * already on the kernel stack and the stale waiter is fully overlaid.
-     * Without this, the blind delay ladder can fire while the waiter is still
-     * in copy_from_user (chain reads half-written words) or before it entered
-     * select at all. On 800ms timeout fire anyway (best effort), like CLI. */
+     * the carrier. v12.12 (SO-54C 定案): 本机 kallsyms 同时有
+     * __arm64_sys_select(72) 与 __arm64_sys_pselect6(73)，libc 反汇编
+     * select@@LIBC->x8=0x48(72)、pselect@@LIBC->x8=0x49(73) —— 通用 arm64
+     * 表（参考 MT6895 移植 GL_SYS_PSELECT6=72）在索尼 vendor 内核上不成立。
+     * 故接受 72 与 73 两者：pselect6 载体驻留时 /proc/<tid>/syscall==73，
+     * 旧 select 载体==72。wchan 含 do_select ⇒ fd_set 拷贝已在内核栈上、
+     * 陈旧 waiter 被完整覆盖。800ms 超时后兜底盲发（同 CLI）。*/
     int32_t proc_first_int_of(const char *path) {
         char buf[64] = {0};
         const int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -112,7 +113,8 @@ namespace {
         snprintf(path, sizeof(path), "/proc/self/task/%d/syscall", tid);
         for (;;) {
             seen = proc_first_int_of(path);
-            if (seen == 72 /* pselect6 */) {
+            if (seen == 72 /* select (Sony vendor table) */ ||
+                seen == 73 /* pselect6 (本机实测 libc x8=0x49) */) {
                 char wpath[48];
                 char wbuf[64] = {0};
                 snprintf(wpath, sizeof(wpath), "/proc/self/task/%d/wchan", tid);
