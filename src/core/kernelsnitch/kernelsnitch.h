@@ -675,9 +675,20 @@ namespace ghostlock::kernelsnitch {
                         }
                     }
                 }
-                if (agree != wanted) {
+                /* v12.15: 2/3 (majority) agreement is enough to keep the set;
+                 * only 0/3 or 1/3 (no majority) is discarded. SO-54C 2026-10-05:
+                 * pass-2 keeps finding 3 colliders but 1-2 addresses drift
+                 * between passes under degraded timing — "agreement 2/3" was the
+                 * weekday killer (run-1: W2 15/15 miss; run-2 attempt-1: 7/8).
+                 * The mm brute-force is the ground truth anyway and the streak
+                 * guard bounds the cost of a genuinely poisoned set (v11.5 note).
+                 */
+                if (agree < 2) {
                     pr_warning("agreement %zu/%zu addresses matched -> discard set\n", agree, wanted);
                     count = 0;
+                } else if (agree != wanted) {
+                    pr_warning("agreement %zu/%zu addresses matched; keeping set for mm arbitrate\n",
+                               agree, wanted);
                 }
             }
         }
