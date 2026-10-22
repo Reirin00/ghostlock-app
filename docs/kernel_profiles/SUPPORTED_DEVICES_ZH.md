@@ -18,6 +18,10 @@ Shizuku 以 shell 用户身份执行攻击，而 shell 没有 seccomp 过滤，�
 未标记的固件不会自动打开该开关，但**任何设备都可以手动开启**：通过 Shizuku 执行同样会跳过
 W3 seccomp bypass，即使并非必需，也能节省时间。
 
+按内核版本号（主版本.次版本.修订号）从小到大排好了。版本号相同的行保持原来的先后顺序。原表只有两行位置不对，已经挪好：
+- `6.1.134` 原来排在 `6.1.115` 前面，现在挪到 `6.1.118` 之后。
+- `6.1.138-...g51f8c580613d` 原来夹在 `6.1.145` 中间，现在挪回其他 `6.1.138` 的后面。
+
 | Kernel                                                 | Devices                                                          |
 |--------------------------------------------------------|------------------------------------------------------------------|
 | `5.10.236-android12-9-00014-gb97c62c4e7d1`             | Sony Xperia 5 IV (SO-54C / PDX-224)                              |
@@ -27,29 +31,33 @@ W3 seccomp bypass，即使并非必需，也能节省时间。
 | `5.15.178-android13-8-00025-g7feb0b0b7cd8-ab14134651`  | Sharp AQUOS R8 SH-R80                                            |
 | `5.15.189-android13-8-00016-g51bba4309aac-ab14546557`  | Sony Xperia 1 V                                                  |
 | `5.15.189-android13-8-00004-g1c3825f8ac0a-ab14110541`  | Sony Xperia 1 V                                                  |
+| `5.15.206-android13-8-00056-g3f87b8704e9e-ab15683575`  | ASUS Zenfone 10                                                  |
 | `6.1.25-android14-11-maybe-dirty`                      | MEIZU 21 / MEIZU 21 Pro                                          |
-| `6.1.134-android14-11-maybe-dirty`                     | Boox Onyx NoteAir6C                                              |
 | `6.1.115-android14-11-ga2521ca27699-ab13294383`        | POCO X6 Pro                                                      |
 | `6.1.118-android14-11-ga3b9c44908dd-ab13320413`        | Redmi Note 15 Pro+                                               |
 | `6.1.118-android14-11-gca0ef6d17716-ab13624819`        | Xiaomi 14                                                        |
+| `6.1.134-android14-11-maybe-dirty`                     | Boox Onyx NoteAir6C                                              |
 | `6.1.138-android14-11-g0c3d559bcd85-ab14529422`        | Xiaomi 14                                                        |
 | `6.1.138-android14-11-g151cf2b6bfbe-ab13719792`        | Lenovo Xiaoxin Pad Pro 12.7 (TB375FC)                            |
 | `6.1.138-android14-11-g6ab8c9a86a33-ab14396278`        | POCO X6 Pro                                                      |
 | `6.1.138-android14-11-g44bda9e8f6e9-ab13792638`        | POCO X6 Pro                                                      |
 | `6.1.138-android14-11-g965475777129-mi`                | REDMI K80                                                        |
 | `6.1.138-android14-11-g2ecae636cf9b-ab14676408`        | Lenovo Yoga Tab Plus (TB520FU)                                   |
+| `6.1.138-android14-11-g51f8c580613d-ab13911623`        | Redmi Note 14 Pro 5G / POCO X7                                   |
 | `6.1.145-android14-11-g09f1c0074ad7-ab14226177`        | Infinix Note 50s 5G, Infinix GT 30 (X6876)                       |
 | `6.1.145-android14-11-g11c274d0441f-ab14259673`        | RedMagic 9(S) Pro (REDMAGICOS11.0.5MR1_GB)                       |
-| `6.1.138-android14-11-g51f8c580613d-ab13911623`        | Redmi Note 14 Pro 5G / POCO X7                                   |
 | `6.1.145-android14-11-g74d1702dab4d-ab14669069`        | vivo T4, IQOO 12                                                 |
 | `6.1.145-android14-11-geaa643a2c0ee-ab14763719`        | Motorola Razr 50 Ultra / Motorola Razr+ 2024                     |
 | `6.1.145-android14-11-g9b69cc399ae1-ab14819715`        | Motorola Edge 60 Fusion                                          |
 | `6.1.157-android14-11-ga8b0b542991e-ab15601211`        | Infinix GT 30 Pro (X6873)                                        |
 | `6.1.157-android14-11-gbd23337e42e7-ab14791245`        | Google Pixel 9a (Tensor G4), Google Pixel 7 (Tensor G2)          |
+| `6.1.157-android14-11-g82d681c9b06b-ab14634535`        | Nothing Phone (3a) Pro (A059P)                                   |
 | `6.1.162-android14-11-gce140c0e5bf5-ab15450923`        | Zenfone 11 Ultra                                                 |
 | `6.1.162-android14-11-g752d9c17787d-ab15574904`        | Google Pixel 9 Pro / 9 Pro Fold (Tensor G4)                      |
 | `6.1.162-android14-11-g5e8b0cffebd1-ab15202165`        | Google Pixel 9a (Tensor G4)                                      |
 | `6.6.30-android15-8-g54dcbfbef792-ab12368803-4k`       | Red Magic Tablet 3 Pro                                           |
+| `6.6.30-android15-8-g6b55ce738535-4k`                  | Redmi 13c                                                        |
+| `6.6.30-android15-8-g24ffe62b0a0e-abogki387229724-4k`  | vivo X200 Pro · 建议使用 Shizuku                                  |
 | `6.6.77-android15-8-g4a507830d890-ab13636293-4k`       | Xiaomi Civi 5 Pro, REDMI K90 / 4 Turbo, POCO F7                  |
 | `6.6.77-android15-8-g63ce7556864c-ab13994517-4k`       | Xiaomi 15                                                        |
 | `6.6.77-android15-8-gca30f3b4bef6-abogki440974771-4k`  | Xiaomi 15 Pro, REDMI K80 Pro / K80 Ultra                         |
